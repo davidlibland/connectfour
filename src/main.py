@@ -26,10 +26,10 @@ def play(ai: AI):
 
 def train(ai1: AI, ai2: AI):
     assert ai1.player != ai2.player, "AIs must play different colors"
-    total_num_games = 100
+    total_num_games = 5
     game_length = 100
     for i in range(total_num_games):
-        game = BatchGame()
+        game = BatchGame(batch_size=128)
         print("\ntraining on game %d of %d" % (i, total_num_games))
         for j in range(game_length):
             n = int(10 * j/game_length)
@@ -47,9 +47,9 @@ def train(ai1: AI, ai2: AI):
 
 
 if __name__ == "__main__":
-    aio = AI.load("Checkpoints-20190402-113002/O-player", Player.O)
+    aio = AI.load("Checkpoints-20190402-152625/O-player", Player.O)
     container = aio._pi._container
-    aix = AI.load("Checkpoints-20190402-113002/X-player", Player.X)
+    aix = AI.load("Checkpoints-20190402-152625/X-player", Player.X)
     train(aio, aix)
     game = play(aio)
     aio.learn_from_games(game.map(BatchGameState.from_game_state))

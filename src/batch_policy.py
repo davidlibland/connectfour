@@ -18,31 +18,31 @@ class Policy:
         self._optimizer = tf.train.AdamOptimizer(lr)
         num_policy_layers = 2
         num_policy_filters = 32
-        num_reward_layers = 1
-        num_reward_filters = 16
+        num_reward_layers = 2
+        num_reward_filters = 32
         with self._container.as_default():
             # Policy network params
             self._p_conv_params = []
             for i in range(num_policy_layers):
                 num_in_filters = 3 if i == 0 else num_policy_filters
                 w = tf.get_variable(
-                    "p_conv_w_%s_%i" % (player.name, i),
+                    "p_conv_w_%i" % i,
                     shape=[3, 3, num_in_filters, num_policy_filters], dtype=tf.float32,
                     initializer=tf.random_normal_initializer(0, 0.05)
                 )
                 b = tf.get_variable(
-                    "p_conv_b_%s_%i" % (player.name, i),
+                    "p_conv_b_%i" % i,
                     shape=[num_policy_filters], dtype=tf.float32,
                     initializer=tf.constant_initializer(0.)
                 )
                 self._p_conv_params.append((w, b))
             self._p_conv_1_w = tf.get_variable(
-                "p_conv_1_w_params_%s" % player.name,
+                "p_conv_1_w_params",
                 shape=[num_cols, num_policy_filters, 1], dtype=tf.float32,
                 initializer=tf.random_normal_initializer(0, 0.05)
             )
             self._p_conv_1_b = tf.get_variable(
-                "p_conv_1_b_params_%s" % player.name,
+                "p_conv_1_b_params",
                 shape=[1], dtype=tf.float32,
                 initializer=tf.constant_initializer(0.)
             )
@@ -54,12 +54,12 @@ class Policy:
             for i in range(num_reward_layers):
                 num_in_filters = 3 if i == 0 else num_reward_filters
                 w = tf.get_variable(
-                    "r_conv_w_%s_%i" % (player.name, i),
+                    "r_conv_w_%i" % i,
                     shape=[3, 3, num_in_filters, num_reward_filters], dtype=tf.float32,
                     initializer=tf.random_normal_initializer(0, 0.05)
                 )
                 b = tf.get_variable(
-                    "r_conv_b_%s_%i" % (player.name, i),
+                    "r_conv_b_%i" % i,
                     shape=[num_reward_filters], dtype=tf.float32,
                     initializer=tf.constant_initializer(0.)
                 )
@@ -67,7 +67,7 @@ class Policy:
                 conv_height -= 2
                 conv_width -= 2
             self._r_dense_param = tf.get_variable(
-                "r_params_%s" % player.name,
+                "r_params",
                 shape=[conv_height, conv_width, num_reward_filters], dtype=tf.float32,
                 initializer=tf.random_normal_initializer(0, 0.05)
             )
@@ -85,7 +85,10 @@ class Policy:
 
     def reward_logits(self, gs: BatchGameState):
         assert gs.turn == self._player, "Can't play on this turn"
-        x = tf.constant(gs.as_array(), dtype=tf.float32)
+        gs_array = gs.as_array()
+        if self.player == Player.O:
+            gs_array = tf.gather(gs_array, [0, 2, 1], axis=-1)
+        x = tf.constant(gs_array, dtype=tf.float32)
         for w,b in self._r_conv_params:
             x = tf.nn.conv2d(x, w, strides=[1, 1, 1, 1], padding="VALID") + b
         logits = tf.einsum("nijk,ijk->n", x, self._r_dense_param)
@@ -97,7 +100,10 @@ class Policy:
 
     def logits(self, gs: BatchGameState):
         assert gs.turn == self._player, "Can't play on this turn"
-        x = tf.constant(gs.as_array(), dtype=tf.float32)
+        gs_array = gs.as_array()
+        if self.player == Player.O:
+            gs_array = tf.gather(gs_array, [0, 2, 1], axis=-1)
+        x = tf.constant(gs_array, dtype=tf.float32)
         for w,b in self._p_conv_params:
             x = tf.nn.conv2d(x, w, strides=[1, 1, 1, 1], padding="SAME") + b
         y = tf.reduce_max(x, axis=1)
