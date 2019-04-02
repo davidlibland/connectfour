@@ -1,6 +1,6 @@
+from src.batch_policy import AI
 from src.batch_game import BatchGameState, BatchGame, Player
-from src.game import GameState, Game
-from src.batch_policy import AI, Policy
+from src.game import Game
 
 
 def play(ai: AI):
@@ -26,9 +26,14 @@ def play(ai: AI):
 
 def train(ai1: AI, ai2: AI):
     assert ai1.player != ai2.player, "AIs must play different colors"
-    for _ in range(5):
+    total_num_games = 100
+    game_length = 100
+    for i in range(total_num_games):
         game = BatchGame()
-        for _ in range(100):
+        print("\ntraining on game %d of %d" % (i, total_num_games))
+        for j in range(game_length):
+            n = int(10 * j/game_length)
+            print("\r"+"*"*n, end="")
             winners = game.cur_state.winners()
             reset_games = [w is not None for w in winners]
             if ai1.player == game.cur_state.turn:
@@ -42,9 +47,9 @@ def train(ai1: AI, ai2: AI):
 
 
 if __name__ == "__main__":
-    aio = AI.load("Checkpoints-20190318-204324/O-player", Player.O)
+    aio = AI.load("Checkpoints-20190402-113002/O-player", Player.O)
     container = aio._pi._container
-    aix = AI.load("Checkpoints-20190318-204324/X-player", Player.X)
+    aix = AI.load("Checkpoints-20190402-113002/X-player", Player.X)
     train(aio, aix)
     game = play(aio)
     aio.learn_from_games(game.map(BatchGameState.from_game_state))

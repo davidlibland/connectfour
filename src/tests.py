@@ -1,4 +1,6 @@
 from functools import reduce
+import tensorflow as tf
+tf.enable_eager_execution()
 
 from src.batch_game import BatchGameState
 from src.game import GameState, Player

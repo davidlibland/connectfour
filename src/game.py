@@ -12,14 +12,27 @@ class Player(Enum):
     O = "O"
     BLANK = " "
 
+def player_embedding_ix(p: Player):
+    if p == Player.BLANK:
+        return 0
+    elif p == Player.X:
+        return 1
+    elif p == Player.O:
+        return 2
+    raise ValueError("Unrecognized player %s" % p)
+
 
 def player_embedding(p: Player):
-    if p == Player.BLANK:
-        return np.array([1,0,0], dtype=np.float32)
-    elif p == Player.X:
-        return np.array([0,1,0], dtype=np.float32)
-    elif p == Player.O:
-        return np.array([0,0,1], dtype=np.float32)
+    result = np.zeros([3], dtype=np.float32)
+    result[player_embedding_ix(p)] = 1
+    return result
+
+
+def player_extraction(vect):
+    for p in [Player.BLANK, Player.X, Player.O]:
+        if vect[player_embedding_ix(p)] == 1:
+            return p
+    raise ValueError("Unparsable embedding %s" % vect)
 
 
 class GameState(AbsGameState):

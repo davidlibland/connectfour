@@ -1,11 +1,13 @@
 import tensorflow as tf
-import numpy as np
 from tensorflow.python.framework.errors_impl import PermissionDeniedError
 
 from src.file_utils import get_dir, build_checkpoint_file_name
 from src.batch_game import BatchGameState, BatchGame, Player
 from src.game import GameState
 import os
+
+from src import nn
+
 tf.enable_eager_execution()
 
 
@@ -14,15 +16,59 @@ class Policy:
         self._player = player
         self._container = tf.contrib.eager.EagerVariableStore()
         self._optimizer = tf.train.AdamOptimizer(lr)
+        num_policy_layers = 2
+        num_policy_filters = 32
+        num_reward_layers = 1
+        num_reward_filters = 16
         with self._container.as_default():
-            self._params = tf.get_variable(
-                "params_%s" % player.name,
-                shape=[num_rows, num_cols, 3, num_cols], dtype=tf.float32,
+            # Policy network params
+            self._p_conv_params = []
+            for i in range(num_policy_layers):
+                num_in_filters = 3 if i == 0 else num_policy_filters
+                w = tf.get_variable(
+                    "p_conv_w_%s_%i" % (player.name, i),
+                    shape=[3, 3, num_in_filters, num_policy_filters], dtype=tf.float32,
+                    initializer=tf.random_normal_initializer(0, 0.05)
+                )
+                b = tf.get_variable(
+                    "p_conv_b_%s_%i" % (player.name, i),
+                    shape=[num_policy_filters], dtype=tf.float32,
+                    initializer=tf.constant_initializer(0.)
+                )
+                self._p_conv_params.append((w, b))
+            self._p_conv_1_w = tf.get_variable(
+                "p_conv_1_w_params_%s" % player.name,
+                shape=[num_cols, num_policy_filters, 1], dtype=tf.float32,
                 initializer=tf.random_normal_initializer(0, 0.05)
             )
-            self._reward_p = tf.get_variable(
+            self._p_conv_1_b = tf.get_variable(
+                "p_conv_1_b_params_%s" % player.name,
+                shape=[1], dtype=tf.float32,
+                initializer=tf.constant_initializer(0.)
+            )
+
+            # reward network params
+            self._r_conv_params = []
+            conv_height = num_rows
+            conv_width = num_cols
+            for i in range(num_reward_layers):
+                num_in_filters = 3 if i == 0 else num_reward_filters
+                w = tf.get_variable(
+                    "r_conv_w_%s_%i" % (player.name, i),
+                    shape=[3, 3, num_in_filters, num_reward_filters], dtype=tf.float32,
+                    initializer=tf.random_normal_initializer(0, 0.05)
+                )
+                b = tf.get_variable(
+                    "r_conv_b_%s_%i" % (player.name, i),
+                    shape=[num_reward_filters], dtype=tf.float32,
+                    initializer=tf.constant_initializer(0.)
+                )
+                self._r_conv_params.append((w, b))
+                conv_height -= 2
+                conv_width -= 2
+            self._r_dense_param = tf.get_variable(
                 "r_params_%s" % player.name,
-                shape=[num_rows, num_cols, 3], dtype=tf.float32,
+                shape=[conv_height, conv_width, num_reward_filters], dtype=tf.float32,
                 initializer=tf.random_normal_initializer(0, 0.05)
             )
         self._global_step = tf.train.get_or_create_global_step()
@@ -39,8 +85,10 @@ class Policy:
 
     def reward_logits(self, gs: BatchGameState):
         assert gs.turn == self._player, "Can't play on this turn"
-        gs_tens = tf.constant(gs.as_array(), dtype=tf.float32)
-        logits = tf.einsum("nijk,ijk->n", gs_tens, self._reward_p)
+        x = tf.constant(gs.as_array(), dtype=tf.float32)
+        for w,b in self._r_conv_params:
+            x = tf.nn.conv2d(x, w, strides=[1, 1, 1, 1], padding="VALID") + b
+        logits = tf.einsum("nijk,ijk->n", x, self._r_dense_param)
         return logits
 
     def ln_pi(self, gs: BatchGameState):
@@ -49,19 +97,31 @@ class Policy:
 
     def logits(self, gs: BatchGameState):
         assert gs.turn == self._player, "Can't play on this turn"
-        gs_tens = tf.constant(gs.as_array(), dtype=tf.float32)
-        logits = tf.einsum("nijk,ijkl->nl", gs_tens, self._params)
-        return logits
+        x = tf.constant(gs.as_array(), dtype=tf.float32)
+        for w,b in self._p_conv_params:
+            x = tf.nn.conv2d(x, w, strides=[1, 1, 1, 1], padding="SAME") + b
+        y = tf.reduce_max(x, axis=1)
+        logits = tf.nn.conv1d(y, self._p_conv_1_w, stride=1, padding="SAME") \
+                 + self._p_conv_1_b
+        return tf.reshape(logits, [gs.batch_size, -1])
 
     def learn_from_games(self, games: BatchGame, alpha=0.9, verbose=True):
         self._global_step.assign_add(1)
         last_state = games.cur_state
-        rewards = tf.constant([
-            1. if winner == self.player else 0.
-            for winner in last_state.winners()
-        ],dtype=tf.float32)
+        rewards = tf.zeros(last_state.batch_size,dtype=tf.float32)
         for i, state in enumerate(games.reversed_states):
-            if state.turn == self.player:
+            if state.turn != self.player:
+                rewards_list = [
+                    1. if winner == self.player else
+                        float(reward * alpha) if winner is None else 0.
+                    for reward, winner in zip(rewards, state.winners())
+                ]
+                rewards = tf.constant(rewards_list, dtype=tf.float32)
+                num_rewards = sum(1 for r in rewards if int(r) == 1)
+                if verbose and num_rewards > 0:
+                    print("Noticed %d rewards on turn -%d for %s"
+                          % (num_rewards, i, self.player))
+            else:
                 # Update the reward function
                 with tf.GradientTape() as gr_tape, self._container.as_default():
                     expected_reward_l = self.reward_logits(state)
@@ -94,11 +154,6 @@ class Policy:
                 self._optimizer.apply_gradients(
                     zip(gradients, self._container.trainable_variables())
                 )
-            rwrds = [
-                1. if winner == self.player else float(reward * alpha) if winner == None else 0.
-                for reward, winner in zip(rewards, state.winners())
-            ]
-            rewards = tf.constant(rwrds, dtype=tf.float32)
 
     @property
     def player(self):
@@ -116,25 +171,19 @@ class Policy:
         p._saver.restore(None, tf.train.latest_checkpoint(ckpt_dir))
         return p
 
+
 class AI:
     def __init__(self, pi: Policy):
         self._pi = pi
 
     def next_moves(self, gs: BatchGameState):
-        possible_actions = gs.next_actions()
+        impossible_actions = tf.logical_not(gs.next_actions())
         logits = self._pi.logits(gs)
-        logit_range = tf.reduce_max(logits)-tf.reduce_min(logits)
-        possible_actions *= -logit_range
-        _m_logits = logits+possible_actions
-        action_ix = tf.random.multinomial(_m_logits, 1)
-        return action_ix
+        return nn.sample_masked_multinomial(logits, impossible_actions, axis=1)
 
     def next_move(self, gs: GameState):
-        possible_actions = list(gs.next_actions())
         bgs = BatchGameState.from_game_state(gs)
-        logits = tf.gather(self._pi.logits(bgs)[0, :], possible_actions)
-        action_ix = tf.random.multinomial(logits[tf.newaxis,:], 1)
-        return possible_actions[action_ix]
+        return self.next_moves(bgs)[0]
 
     @property
     def player(self):
