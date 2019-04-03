@@ -31,29 +31,8 @@ class AbsBatchGameState(ABC, Generic[A, P]):
     def start_state(cls) -> "AbsBatchGameState":
         raise NotImplementedError
 
-class AbsGameState(ABC, Generic[A, P]):
-    @abstractmethod
-    def next_actions(self) -> Iterator[A]:
-        raise NotImplementedError
 
-    @abstractmethod
-    def winner(self) -> Optional[P]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def play_at(self, A) -> "AbsGameState":
-        raise NotImplementedError
-
-    @property
-    @abstractmethod
-    def turn(self) -> P:
-        raise NotImplementedError
-
-    @classmethod
-    def start_state(cls) -> "AbsGameState":
-        raise NotImplementedError
-
-GS = TypeVar("GS", AbsGameState, AbsBatchGameState)
+GS = TypeVar("GS", bound=AbsBatchGameState)
 class ABSGame(ABC, Generic[GS]):
     @property
     @abstractmethod

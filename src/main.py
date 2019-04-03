@@ -30,7 +30,7 @@ def train(ai1: AI, ai2: AI):
     game_length = 100
     for i in range(total_num_games):
         games = BatchGame(batch_size=128)
-        print("\ntraining on game %d of %d" % (i, total_num_games))
+        print("\ntraining on game %d of %d" % (i+1, total_num_games))
         for j in range(game_length):
             n = int(10 * j/game_length)
             print("\r"+"*"*n, end="")
