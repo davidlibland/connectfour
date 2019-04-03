@@ -5,11 +5,6 @@ P = TypeVar("P")
 A = TypeVar("A")
 
 class AbsBatchGameState(ABC, Generic[A, P]):
-    @classmethod
-    @abstractmethod
-    def from_game_state(cls, gs: "AbsGameState") -> "AbsBatchGameState":
-        raise NotImplementedError
-
     @abstractmethod
     def next_actions(self) -> Iterator[A]:
         raise NotImplementedError
