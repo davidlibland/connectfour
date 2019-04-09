@@ -1,5 +1,6 @@
 from functools import reduce
 from typing import Optional, List
+import random
 
 import numpy as np
 import tensorflow as tf
@@ -12,16 +13,25 @@ from src.play_state import (
     play_state_extraction,
 )
 
+MIN_WIDTH, MAX_WIDTH = 5, 10
+MIN_HEIGHT, MAX_HEIGHT = 5, 10
 
 class BatchGameState(AbsBatchGameState):
-    def __init__(self, state=None, turn=PlayState.X, num_rows=5, num_cols=5, batch_size=32):
+    def __init__(self, state=None, turn="Random", num_rows="Random", num_cols="Random", batch_size=32):
         if state is not None:
             self._batch_size, self._num_rows, self._num_cols, _ = state.shape
         else:
+            if not isinstance(num_rows, int) or num_rows <= 0:
+                num_rows = random.randint(MIN_HEIGHT, MAX_HEIGHT)
+            if not isinstance(num_cols, int) or num_cols <= 0:
+                num_cols = random.randint(MIN_WIDTH, MAX_WIDTH)
             self._batch_size = batch_size
             self._num_cols, self._num_rows = num_cols, num_rows
             state = self._blank_boards()
         self._board_state = state
+        if turn != PlayState.X and turn != PlayState.O:
+            # Choose a random turn.
+            turn = random.choice([PlayState.X, PlayState.O])
         self._turn = turn
 
     def _blank_board(self):

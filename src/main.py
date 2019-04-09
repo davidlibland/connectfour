@@ -3,8 +3,8 @@ from src.game import BatchGame
 from src.play_state import PlayState
 
 
-def play(ai: AI):
-    game = BatchGame(batch_size=1)
+def play(ai: AI, turn=PlayState.X):
+    game = BatchGame(batch_size=1, turn=turn)
     while game.cur_state.winners()[0] is None:
         if ai.player == game.cur_state.turn:
             moves = ai.next_moves(game.cur_state)
@@ -26,7 +26,7 @@ def play(ai: AI):
 
 def train(ai1: AI, ai2: AI):
     assert ai1.player != ai2.player, "AIs must play different colors"
-    total_num_games = 1
+    total_num_games = 5000
     game_length = 100
     for i in range(total_num_games):
         games = BatchGame(batch_size=128)
@@ -42,16 +42,29 @@ def train(ai1: AI, ai2: AI):
             else:
                 moves = ai2.next_moves(games.cur_state)
                 games = games.add_state(games.cur_state.play_at(moves, reset_games))
+        print(" Now learning.")
         ai1.learn_from_games(games, verbose=True)
+        ai1.save()
         ai2.learn_from_games(games, verbose=True)
+        ai2.save()
 
 
 if __name__ == "__main__":
-    aio = AI.load("Checkpoints-20190402-152625/O-player", PlayState.O)
+    aio = AI.load("Checkpoints-20190409-085820", "O-player", PlayState.O)
     container = aio._pi._container
-    aix = AI.load("Checkpoints-20190402-152625/X-player", PlayState.X)
+    aix = AI.load("Checkpoints-20190409-085820", "X-player", PlayState.X)
     train(aio, aix)
-    games = play(aix)
-    aio.learn_from_games(games)
-    aio.save("O-player")
-    aix.save("X-player")
+    play_again = "y"
+    while play_again == "y":
+        player_txt = ""
+        while player_txt not in ["x", "o"]:
+            player_txt = input("Play as X or O? ").lower()
+        if player_txt == "x":
+            ai = aio
+        else:
+            ai = aix
+        games = play(ai)
+        ai.learn_from_games(games)
+        play_again = input("Would you like to play again? ").lower()
+    aio.save()
+    aix.save()

@@ -31,3 +31,11 @@ def play_state_extraction(vect):
         if vect[play_state_embedding_ix(p)] == 1:
             return p
     raise ValueError("Unparsable embedding %s" % vect)
+
+
+def opponent(p: PlayState):
+    if p == PlayState.X:
+        return PlayState.O
+    elif p == PlayState.O:
+        return PlayState.X
+    raise ValueError("No opponent for %s" % p)
