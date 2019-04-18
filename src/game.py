@@ -1,5 +1,5 @@
 from functools import reduce
-from typing import Optional, List, Iterable
+from typing import List
 import random
 
 import numpy as np
@@ -46,7 +46,14 @@ class BatchGameState(AbsBatchGameState):
         blank_board = self._blank_board()
         return np.array([blank_board]*self.batch_size)
 
-    def winners(self, run_length=4) -> Iterable[Optional[PlayState]]:
+    def winners(self, run_length=4) -> np.ndarray:
+        """
+        Returns an array of `Optional[PlayState]`
+        None = "no winner"
+        PlayState.DRAW = "draw"
+        PlayState.X = "X won"
+        PlayState.O = "O won"
+        """
         results = np.array([None]*self.batch_size)
         # find draws:
         blank_spaces = self._board_state \
@@ -55,12 +62,8 @@ class BatchGameState(AbsBatchGameState):
         draws = num_blank_spaces == 0
         results[np.array(draws)] = PlayState.DRAW
         # find wins:
-        win_types = []
-        for filter in self._get_winning_filters(run_length):
-            x = torch.Tensor(self._board_state[:, :, :, :])
-            w = F.conv2d(x, filter, stride=1, padding=1)
-            win_types.append(np.max(w.numpy(), axis=(2, 3)))
-        wins = reduce(np.maximum, win_types) >= run_length
+        existent_runs = self.get_max_runs(max_run_length=run_length)
+        wins = existent_runs >= run_length
         for p in [PlayState.X, PlayState.O]:
             results[np.array(wins[:, play_state_embedding_ix(p)])] = p
         return results
@@ -70,7 +73,7 @@ class BatchGameState(AbsBatchGameState):
         blank_ix = play_state_embedding_ix(PlayState.BLANK)
         blank_space_indicator = torch.Tensor(self._board_state[:, blank_ix, :, :])
         num_blank_spaces = torch.sum(blank_space_indicator, dim=(1,))
-        actions = num_blank_spaces != 0
+        actions: torch.ByteTensor = num_blank_spaces != 0
         return actions
 
     @property
@@ -132,18 +135,45 @@ class BatchGameState(AbsBatchGameState):
     def as_array(self):
         return self._board_state
 
-    @memoize
-    def _get_winning_filters(self, run_length: int=4):
-        # get horizontal filter
-        horiz = np.einsum("ij,kl->klij", np.ones([1, run_length]), np.eye(3))
-        # get vertical filter
-        vert = np.einsum("ij,kl->klij", np.ones([run_length, 1]), np.eye(3))
-        # get diagonal filter
-        diag = np.einsum("ij,kl->klij", np.eye(run_length), np.eye(3))
-        # get anti-diagonal filter
-        anti_diag = np.einsum("ij,kl->klij", np.eye(run_length)[:,::-1], np.eye(3))
-        np_weights = [horiz, vert, diag, anti_diag]
-        return [torch.Tensor(w) for w in np_weights]
+    def get_max_runs(self, max_run_length=4):
+        """
+        Processes the boards with win-shapes, and returns the max run-length
+        for each player.
+
+        :param run_length: No run length below this will be considered.
+        :return: An array of shape (n, 3), where n is the batch size,
+        and index [i,j] indicates the maximum run length for player j on game i.
+        """
+        win_types = []
+        for filter in get_winning_filters(max_run_length):
+            x = torch.Tensor(self._board_state[:, :, :, :])
+            w = F.conv2d(x, filter, stride=1, padding=1)
+            win_types.append(np.max(w.numpy(), axis=(2, 3)))
+        return reduce(np.maximum, win_types)
+
+    def split(self) -> List["BatchGameState"]:
+        """Unbatches the game state."""
+        states = [self._board_state[i:i+1,...] for i in range(self.batch_size)]
+        return[
+            BatchGameState(state=state, turn=self.turn)
+            for state in states
+        ]
+
+
+# Helpers:
+
+@memoize
+def get_winning_filters(run_length: int=4):
+    # get horizontal filter
+    horiz = np.einsum("ij,kl->klij", np.ones([1, run_length]), np.eye(3))
+    # get vertical filter
+    vert = np.einsum("ij,kl->klij", np.ones([run_length, 1]), np.eye(3))
+    # get diagonal filter
+    diag = np.einsum("ij,kl->klij", np.eye(run_length), np.eye(3))
+    # get anti-diagonal filter
+    anti_diag = np.einsum("ij,kl->klij", np.eye(run_length)[:,::-1], np.eye(3))
+    np_weights = [horiz, vert, diag, anti_diag]
+    return [torch.Tensor(w) for w in np_weights]
 
 
 BatchGame = ABSGame.factory(BatchGameState)

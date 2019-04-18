@@ -1,8 +1,9 @@
 from abc import ABC, abstractmethod
-from typing import Iterator, Optional, Generic, TypeVar, Type, List, Union
+from typing import Iterator, Optional, Generic, TypeVar, Type, List
 
 P = TypeVar("P")
 A = TypeVar("A")
+
 
 class AbsBatchGameState(ABC, Generic[A, P]):
     @abstractmethod
@@ -118,3 +119,14 @@ class ABSGame(ABC, Generic[GS, A]):
                 return g
 
         return FGame
+
+
+class AbsAI(ABC, Generic[A, GS, P]):
+    @abstractmethod
+    def next_moves(self, gs: GS) -> A:
+        raise NotImplementedError
+
+    @property
+    @abstractmethod
+    def player(self) -> P:
+        raise NotImplementedError
