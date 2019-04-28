@@ -1,5 +1,6 @@
 import re
 import glob
+from typing import Union
 
 import torch
 import torch.nn as nn
@@ -20,28 +21,45 @@ class AI(nn.Module, AbsAI):
     def __init__(
             self,
             player: PlayState,
-            value: Value=None,
+            value: Union[Value, dict]=None,
             value_optimizer_state_dict: dict=None,
-            policy: Policy=None,
+            policy: Union[Policy, dict]=None,
             policy_optimizer_state_dict: dict=None,
             step: int=1,
             lr=1e-3,
-            momentum=0.9):
+            weight_decay=3e-2,
+            momentum=0.9,):
         super().__init__()
         # Has both a policy and a value function.
 
         # Load the value model and its optimizer
-        self.value = value if value else Value()
-        self.value_optimizer = torch.optim.SGD(
-            self.value.parameters(), lr=lr, momentum=momentum
+        if isinstance(value, Value):
+            self.value = value
+        elif isinstance(value, dict):
+            self.value = Value(**value)
+        else:
+            self.value = Value()
+        self.value_optimizer = torch.optim.Adam(
+            self.value.parameters(),
+            lr=lr,
+            # momentum=momentum,
+            weight_decay=weight_decay
         )
         if value_optimizer_state_dict:
             self.value_optimizer.load_state_dict(value_optimizer_state_dict)
 
         # Load the policy model and its optimizer
-        self.policy = policy if policy else Policy()
-        self.policy_optimizer = torch.optim.SGD(
-            self.policy.parameters(), lr=lr, momentum=momentum
+        if isinstance(policy, Policy):
+            self.policy = policy
+        elif isinstance(policy, dict):
+            self.policy = Policy(**policy)
+        else:
+            self.policy = Policy()
+        self.policy_optimizer = torch.optim.Adam(
+            self.policy.parameters(),
+            lr=lr,
+            # momentum=momentum,
+            weight_decay=weight_decay
         )
         if policy_optimizer_state_dict:
             self.policy_optimizer.load_state_dict(policy_optimizer_state_dict)
@@ -89,6 +107,7 @@ class AI(nn.Module, AbsAI):
             self,
             gs_0: BatchGameState,
             action: torch.Tensor,
+            gs_1: BatchGameState,
             gs_2: BatchGameState,
             verbose=True
     ) -> float:
@@ -98,17 +117,23 @@ class AI(nn.Module, AbsAI):
         have played).
         """
         # Collect rewards
-        winners = gs_2.winners()
+        old_winners = gs_0.winners()
+        new_game_mask = torch.Tensor([
+            0. if winner is not None else 1.
+            for winner in old_winners
+        ])
+        winners_1 = gs_1.winners()
+        winners_2 = gs_2.winners()
         with torch.no_grad():
             expected_reward_2 = self.expected_reward(gs_2)
             # ToDo: rewrite as `torch.where` to optimize.
             rewards = torch.Tensor([
-                1. if winner == self.player else
-                -1. if winner == self.opponent else expected_reward_2[i]
-                for i, winner in enumerate(winners)
+                1. if winner_1 == self.player else
+                -1. if winner_2 == self.opponent else expected_reward_2[i]
+                for i, (winner_1, winner_2) in enumerate(zip(winners_1, winners_2))
             ])
         expected_reward_0 = self.expected_reward(gs_0)
-        deltas = rewards - expected_reward_0
+        deltas = new_game_mask * (rewards - expected_reward_0)
         if verbose:
             print("reward loss: %s" % float(deltas**2))
 
@@ -123,7 +148,7 @@ class AI(nn.Module, AbsAI):
 
         self.policy.zero_grad()
         # Weight the updates by the deltas.
-        ln_pi.backward(- deltas.view(-1, 1) * one_hot_action)
+        ln_pi.backward(-deltas.view(-1, 1) * one_hot_action)
         self.policy_optimizer.step()
 
         # Increase the step count:
@@ -151,11 +176,14 @@ class AI(nn.Module, AbsAI):
         torch.save({
             "step": self._step,
             "value_state_dict": self.value.state_dict(),
+            "value_options": self.value.options,
             "value_optimizer_state_dict": self.value_optimizer.state_dict(),
             "policy_state_dict": self.policy.state_dict(),
+            "policy_options": self.policy.options,
             "policy_optimizer_state_dict": self.policy_optimizer.state_dict(),
             # 'loss': loss,
         }, fp)
+        print("Saved at %s" % fp)
 
     @classmethod
     def load(cls, fp_regex=None, player: PlayState=PlayState.X):
@@ -169,20 +197,32 @@ class AI(nn.Module, AbsAI):
         try:
             print("Loading %s" % fp)
             checkpoint = torch.load(fp)
+            policy = Policy(
+                **checkpoint.get("policy_options", {})
+            )
+            policy.load_state_dict(
+                checkpoint["policy_state_dict"]
+            )
+            value = Value(
+                **checkpoint.get("value_options", {})
+            )
+            value.load_state_dict(checkpoint["value_state_dict"])
             ai = AI(
                 player=player,
-                value=Value().load_state_dict(checkpoint["value_state_dict"]),
+                value=value,
                 value_optimizer_state_dict
                 =checkpoint["value_optimizer_state_dict"],
-                policy=Policy().load_state_dict(
-                    checkpoint["policy_state_dict"]
-                ),
+                policy=policy,
                 policy_optimizer_state_dict
                 =checkpoint["policy_optimizer_state_dict"],
                 step=checkpoint["step"]
             )
+            print("loaded model: \n\t%s\n\t%s" %
+                  (policy.options, value.options))
         except Exception as exc:
             print("Unable to load policy:", exc)
             ai = AI(player=player)
+            print("Initializing new AI: \n\t%s\n\t%s" %
+                  (ai.policy.options, ai.value.options))
         ai._fp = fp
         return ai

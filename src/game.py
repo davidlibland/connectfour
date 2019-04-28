@@ -100,8 +100,8 @@ class BatchGameState(AbsBatchGameState):
                 new_state[n, :, :, :] = self._blank_board()
                 continue
             assert 0 != np.sum(self._board_state[n, play_state_embedding_ix(PlayState.BLANK), :, j]), \
-                "Must play valid move! Column %d is full!" \
-                % j
+                "Must play valid move! Column %d is full! Board: %s, plays: %s" % \
+                (j, self.split()[n], [{"mv": m, "reset": rs} for m, rs in zip(js, reset_games)])
             i = 1
             for i in range(1, self._num_rows+1):
                 if self._board_state[n, play_state_embedding_ix(PlayState.BLANK), -i, j] == 1:

@@ -18,6 +18,7 @@ def play(ai: AI, turn=PlayState.X):
                 ai.learn_from_update(
                     game.liat.liat.cur_state,
                     game.liat.prev_action,
+                    game.liat.cur_state,
                     game.cur_state
                 )
             game = game.play_at(moves)
@@ -37,17 +38,18 @@ def play(ai: AI, turn=PlayState.X):
         ai.learn_from_update(
             game.liat.liat.cur_state,
             game.liat.prev_action,
+            game.liat.cur_state,
             game.cur_state
         )
     return game
 
 
-def train(ai1: AI, ai2: AI, eval_interval=1, ai1_comp: AbsAI=None, ai2_comp: AbsAI=None):
+def train(ai1: AI, ai2: AI, eval_interval=5, ai1_comp: AbsAI=None, ai2_comp: AbsAI=None):
     assert ai1.player != ai2.player, "AIs must play different colors"
-    total_num_games = 5000
+    total_num_games = 50000
     game_length = 100
     for i in range(total_num_games):
-        games = BatchGame(batch_size=256)
+        games = BatchGame(batch_size=256, num_rows=7, num_cols=7)
         print("\ntraining on game %d of %d" % (i+1, total_num_games))
         losses = []
         avg_loss = 0
@@ -71,11 +73,20 @@ def train(ai1: AI, ai2: AI, eval_interval=1, ai1_comp: AbsAI=None, ai2_comp: Abs
                 reward_loss = ai.learn_from_update(
                     games.liat.liat.cur_state,
                     games.liat.prev_action,
+                    games.liat.cur_state,
                     games.cur_state,
                     verbose=False
                 )
                 losses.append(reward_loss)
-            games = games.play_at(moves, reset_games)
+            try:
+                games = games.play_at(moves, reset_games)
+            except Exception as exc:
+                print(games.liat.cur_state)
+                print(games.cur_state)
+                print([(m, r) for m, r in zip(moves, reset_games)])
+                print(~games.cur_state.next_actions())
+                print(ai.policy_logits(games.cur_state))
+                raise exc
         if i != 0 and i % eval_interval == 0:
             print("\nSaving the models")
             # Save the models.
@@ -101,7 +112,7 @@ def train(ai1: AI, ai2: AI, eval_interval=1, ai1_comp: AbsAI=None, ai2_comp: Abs
 def eval_models(ai_player: AI, ai_opponent: AbsAI,
                 game_length=100, batch_size=1):
     assert ai_player.player != ai_opponent.player
-    games = BatchGame(batch_size=batch_size)
+    games = BatchGame(batch_size=batch_size, num_rows=7, num_cols=7)
     rewards = {"wins": 0, "losses": 0, "draws":0, "step": ai_player.step}
     for j in range(game_length):
         n = int(10 * j/game_length)

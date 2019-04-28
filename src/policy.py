@@ -7,8 +7,8 @@ from src.game import BatchGameState
 
 class Policy(nn.Module):
     def __init__(self,
-                 num_policy_2d_layers: int=2,
-                 num_policy_1d_layers: int=2,
+                 num_policy_2d_layers: int=4,
+                 num_policy_1d_layers: int=3,
                  num_policy_filters: int=64,
                  ):
         super().__init__()
@@ -22,6 +22,11 @@ class Policy(nn.Module):
         for i in range(num_policy_1d_layers-1):
             self.conv_1d.append(nn.Conv1d(num_policy_filters, num_policy_filters, 3, padding=1))
         self.final = nn.Conv1d(num_policy_filters, 1, 3, padding=1)
+        self.options = {
+            "num_policy_2d_layers": num_policy_2d_layers,
+            "num_policy_1d_layers": num_policy_1d_layers,
+            "num_policy_filters": num_policy_filters
+        }
 
     def forward(self, x):
         """returns the logits"""

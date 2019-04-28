@@ -60,7 +60,7 @@ class MCTreeSearchAI(AbsAI):
         cur_depth = 0
         while cur_depth < self._depth and action_state_vals:
             action_state_vals.sort(
-                key=lambda a_s_v: a_s_v[2],
+                key=lambda a_s_v: 0 if a_s_v[2] == PlayState.DRAW else a_s_v[2],
                 reverse=cur_depth % 2
             )
             next_asvs = []

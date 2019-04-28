@@ -5,7 +5,7 @@ import torch.nn.functional as F
 
 class Value(nn.Module):
     def __init__(self,
-        num_reward_layers: int=2,
+        num_reward_layers: int=4,
         num_reward_filters: int=64
     ):
         super().__init__()
@@ -17,6 +17,10 @@ class Value(nn.Module):
             self.conv.append(nn.Conv2d(num_in_filters, num_reward_filters, 3, padding=1))
         # an affine operation: y = Wx + b
         self.fc = nn.Linear(num_reward_filters, 1)
+        self.options = {
+            "num_reward_layers": num_reward_layers,
+            "num_reward_filters": num_reward_filters
+        }
 
     def forward(self, x):
         """returns the logits"""
