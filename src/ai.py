@@ -125,6 +125,7 @@ class AI(nn.Module, AbsAI):
         winners_1 = gs_1.winners()
         winners_2 = gs_2.winners()
         with torch.no_grad():
+            self.value.eval()  # Eval mode for next step values.
             expected_reward_2 = self.expected_reward(gs_2)
             # ToDo: rewrite as `torch.where` to optimize.
             rewards = torch.Tensor([
@@ -132,6 +133,7 @@ class AI(nn.Module, AbsAI):
                 -1. if winner_2 == self.opponent else expected_reward_2[i]
                 for i, (winner_1, winner_2) in enumerate(zip(winners_1, winners_2))
             ])
+        self.value.train()  # Train mode for current step values.
         expected_reward_0 = self.expected_reward(gs_0)
         deltas = new_game_mask * (rewards - expected_reward_0)
         if verbose:

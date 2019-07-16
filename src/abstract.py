@@ -130,3 +130,11 @@ class AbsAI(ABC, Generic[A, GS, P]):
     @abstractmethod
     def player(self) -> P:
         raise NotImplementedError
+
+    def train(self):
+        """Mimic nn.Model.train"""
+        pass
+
+    def eval(self):
+        """Mimic nn.Model.eval"""
+        pass

@@ -12,8 +12,7 @@ def play(ai: AI, turn=PlayState.X):
     game = BatchGame(batch_size=1, turn=turn)
     while game.cur_state.winners()[0] is None:
         if ai.player == game.cur_state.turn:
-            # Move and learn
-            moves = ai.next_moves(game.cur_state)
+            # learn and move
             if game.liat and game.liat.liat:
                 ai.learn_from_update(
                     game.liat.liat.cur_state,
@@ -21,6 +20,8 @@ def play(ai: AI, turn=PlayState.X):
                     game.liat.cur_state,
                     game.cur_state
                 )
+            ai.eval()
+            moves = ai.next_moves(game.cur_state)
             game = game.play_at(moves)
         else:
             print(game.cur_state)
@@ -46,13 +47,15 @@ def play(ai: AI, turn=PlayState.X):
 
 def train(ai1: AI, ai2: AI, eval_interval=5, ai1_comp: AbsAI=None, ai2_comp: AbsAI=None):
     assert ai1.player != ai2.player, "AIs must play different colors"
-    total_num_games = 50000
+    total_num_games = 500
     game_length = 100
     for i in range(total_num_games):
         games = BatchGame(batch_size=256, num_rows=7, num_cols=7)
         print("\ntraining on game %d of %d" % (i+1, total_num_games))
         losses = []
         avg_loss = 0
+        ai1.train()
+        ai2.train()
         for j in range(game_length):
             n = int(10 * j/game_length)
             if losses:
@@ -67,8 +70,7 @@ def train(ai1: AI, ai2: AI, eval_interval=5, ai1_comp: AbsAI=None, ai2_comp: Abs
             else:
                 ai = ai2
 
-            # Move and learn
-            moves = ai.next_moves(games.cur_state)
+            # learn and move
             if games.liat and games.liat.liat:
                 reward_loss = ai.learn_from_update(
                     games.liat.liat.cur_state,
@@ -78,6 +80,7 @@ def train(ai1: AI, ai2: AI, eval_interval=5, ai1_comp: AbsAI=None, ai2_comp: Abs
                     verbose=False
                 )
                 losses.append(reward_loss)
+            moves = ai.next_moves(games.cur_state)
             try:
                 games = games.play_at(moves, reset_games)
             except Exception as exc:
@@ -114,6 +117,8 @@ def eval_models(ai_player: AI, ai_opponent: AbsAI,
     assert ai_player.player != ai_opponent.player
     games = BatchGame(batch_size=batch_size, num_rows=7, num_cols=7)
     rewards = {"wins": 0, "losses": 0, "draws":0, "step": ai_player.step}
+    ai_player.eval()
+    ai_opponent.eval()
     for j in range(game_length):
         n = int(10 * j/game_length)
         print("\r" + "*" * n, end="")
