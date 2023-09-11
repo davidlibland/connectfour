@@ -110,7 +110,7 @@ class Policy:
         for w,b in self._r_conv_params:
             x = tf.nn.conv2d(x, w, strides=[1, 1, 1, 1], padding="VALID") + b
             x = tf.nn.relu(x)
-        y = tf.reduce_max(x, axis=[1,2])
+        y = tf.reduce_max(x, axis=[2, 3])
         mu = tf.einsum("nk,k->n", y, self._r_dense_mu_w) \
              + self._r_dense_mu_b
         log_sig = tf.einsum("nk,k->n", y, self._r_dense_sig_w) \

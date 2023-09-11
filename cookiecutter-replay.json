@@ -1,0 +1,20 @@
+{
+  "cookiecutter": {
+    "_copy_without_render": [
+        "*.csv",
+        "*.png",
+        "*.svg"
+    ],
+    "_output_dir": "/Users/dlibland/dev",
+    "_repo_dir": "/Users/dlibland/.cookiecutters/pbp_template",
+    "author": "David Li-Bland",
+    "author_email": "david.libland@gmail.com",
+    "description": "This is a quick and dirty connect-four game; really just an RL sandbox.",
+    "name": "davidlibland/connectfour",
+    "package": "connectfour",
+    "project_slug": "connectfour",
+    "project_url": "https://github.com/davidlibland/connectfour",
+    "short_name": "connectfour",
+    "upstream_org": "davidlibland"
+}
+}

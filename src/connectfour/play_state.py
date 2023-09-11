@@ -1,6 +1,6 @@
 from enum import Enum
 
-import numpy as np
+import torch
 
 
 class PlayState(Enum):
@@ -21,7 +21,7 @@ def play_state_embedding_ix(p: PlayState):
 
 
 def play_state_embedding(p: PlayState):
-    result = np.zeros([3], dtype=np.float32)
+    result = [0, 0, 0]
     result[play_state_embedding_ix(p)] = 1
     return result
 

@@ -3,10 +3,11 @@ from typing import Optional, List
 import random
 
 import numpy as np
-import tensorflow as tf
+import torch
+import torch.nn as nn
 
-from src.abstract import AbsBatchGameState, ABSGame
-from src.play_state import (
+from connectfour.abstract import AbsBatchGameState, ABSGame
+from connectfour.play_state import (
     PlayState,
     play_state_embedding_ix,
     play_state_embedding,
@@ -16,10 +17,12 @@ from src.play_state import (
 MIN_WIDTH, MAX_WIDTH = 5, 10
 MIN_HEIGHT, MAX_HEIGHT = 5, 10
 
+
 class BatchGameState(AbsBatchGameState):
+    """The connectfour game."""
     def __init__(self, state=None, turn="Random", num_rows="Random", num_cols="Random", batch_size=32):
         if state is not None:
-            self._batch_size, self._num_rows, self._num_cols, _ = state.shape
+            self._batch_size, _, self._num_rows, self._num_cols = state.shape
         else:
             if not isinstance(num_rows, int) or num_rows <= 0:
                 num_rows = random.randint(MIN_HEIGHT, MAX_HEIGHT)
@@ -35,27 +38,28 @@ class BatchGameState(AbsBatchGameState):
         self._turn = turn
 
     def _blank_board(self):
-        return np.array([
-                            [play_state_embedding(PlayState.BLANK)] * self._num_cols
-        ]*self._num_rows)
+        return torch.tile(
+            torch.tensor(play_state_embedding(PlayState.BLANK))[:, None, None],
+            (1, self._num_rows, self._num_cols)
+        )
 
     def _blank_boards(self):
         blank_board = self._blank_board()
-        return np.array([blank_board]*self.batch_size)
+        return torch.tile(blank_board[None, :, :, :], (self.batch_size, 1, 1, 1))
 
     def winners(self, run_length=4) -> List[Optional[PlayState]]:
         results = np.array([None]*self.batch_size)
         # find draws:
-        num_blank_spaces = tf.reduce_sum(self._board_state[:, :, :, 0], axis=[1, 2])
-        draws = tf.equal(num_blank_spaces, 0)
+        num_blank_spaces = torch.sum(self._board_state[:, 0, :, :], dim=[1, 2])
+        draws = num_blank_spaces == 0
         results[np.array(draws)] = PlayState.DRAW
         # find wins:
         win_types = []
         for filter in self._get_winning_filters(run_length):
-            w = tf.nn.conv2d(self._board_state[:, :, :, :], filter,
-                         strides=[1, 1, 1, 1], padding="VALID")
-            win_types.append(tf.reduce_max(w, axis=[1,2]))
-        wins = reduce(tf.maximum, win_types) >= run_length
+            w = nn.functional.conv2d(self._board_state.to(dtype=filter.dtype), filter,
+                         stride=1, padding="valid")
+            win_types.append(torch.amax(w, dim=(2, 3)))
+        wins = reduce(torch.maximum, win_types) >= run_length
         for p in [PlayState.X, PlayState.O]:
             results[np.array(wins[:, play_state_embedding_ix(p)])] = p
         return results
@@ -63,9 +67,9 @@ class BatchGameState(AbsBatchGameState):
     def next_actions(self) -> np.array:
         # Find the columns with at least one blank entry
         blank_ix = play_state_embedding_ix(PlayState.BLANK)
-        blank_space_indicator = self._board_state[:, :, :, blank_ix]
-        num_blank_spaces = tf.reduce_sum(blank_space_indicator, axis=1)
-        actions = tf.not_equal(num_blank_spaces, 0)
+        blank_space_indicator = self._board_state[:, blank_ix, :, :]
+        num_blank_spaces = torch.sum(blank_space_indicator, dim=1)
+        actions = num_blank_spaces != 0
         return actions
 
     @property
@@ -84,21 +88,19 @@ class BatchGameState(AbsBatchGameState):
 
     def play_at(self, js: List[int], reset_games: List[bool]=None
                 ) -> "BatchGameState":
-        new_state = self._board_state.copy()
-        if reset_games is None:
-            reset_games = [False]*self.batch_size
-        for n, (j, reset) in enumerate(zip(js, reset_games)):
-            if reset:
-                new_state[n, :, :, :] = self._blank_board()
-                continue
-            assert 0 != tf.reduce_sum(self._board_state[n, :, j, play_state_embedding_ix(PlayState.BLANK)]), \
-                "Must play valid move! Column %d is full!" \
-                % j
-            i = 1
-            for i in range(1, self._num_rows+1):
-                if self._board_state[n, -i, j, play_state_embedding_ix(PlayState.BLANK)] == 1:
-                    break
-            new_state[n, -i, j, :] = play_state_embedding(self._turn)
+        new_state = torch.clone(self._board_state)
+        # Determine the number of previous plays in each column by summing the one hot mask:
+        num_plays = torch.einsum("ijki->i", self._board_state[:, play_state_embedding_ix(PlayState.BLANK)+1:, :, js])
+        is_ = self._num_rows - 1 - num_plays
+        # Set the one-hot-values at those locations
+        for ix, v in enumerate(play_state_embedding(self._turn)):
+            new_state[torch.arange(self._batch_size), ix, is_, js] = v
+
+        # reset any other games.
+        if reset_games is not None:
+            new_state[reset_games, :, :, :] = torch.tile(
+                self._blank_board(), (np.sum(reset_games), 1, 1, 1)
+            )
         return BatchGameState(new_state, self._next_turn)
 
     def __hash__(self):
@@ -111,7 +113,7 @@ class BatchGameState(AbsBatchGameState):
                 to_val(play_state_extraction(v)) for v in row
             ])
             for row in game
-        ]) for game in self._board_state.tolist()])
+        ]) for game in torch.permute(self._board_state, (0, 2, 3, 1)).tolist()])
 
     def __str__(self):
         game_strs = []
@@ -129,13 +131,14 @@ class BatchGameState(AbsBatchGameState):
 
     def _get_winning_filters(self, run_length: int=4):
         # get horizontal filter
-        horiz = tf.einsum("ij,kl->ijkl", tf.ones([1, run_length]), tf.eye(3))
+        horiz = torch.einsum("ij,kl->ijkl", torch.eye(3), torch.ones([1, run_length]))
         # get vertical filter
-        vert = tf.einsum("ij,kl->ijkl", tf.ones([run_length, 1]), tf.eye(3))
+        vert = torch.einsum("ij,kl->ijkl", torch.eye(3), torch.ones([run_length, 1]))
         # get diagonal filter
-        diag = tf.einsum("ij,kl->ijkl", tf.eye(run_length), tf.eye(3))
+        diag = torch.einsum("ij,kl->ijkl", torch.eye(3), torch.eye(run_length))
         # get anti-diagonal filter
-        anti_diag = tf.einsum("ij,kl->ijkl", tf.eye(run_length)[:,::-1], tf.eye(3))
+        anti_diag_ = torch.flip(torch.eye(run_length), (1,))
+        anti_diag = torch.einsum("ij,kl->ijkl", torch.eye(3), anti_diag_)
         return [horiz, vert, diag, anti_diag]
 
 

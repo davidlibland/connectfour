@@ -1,6 +1,6 @@
-from src.policy import AI
-from src.game import BatchGame
-from src.play_state import PlayState
+from connectfour.policy import AI
+from connectfour.game import BatchGame
+from connectfour.play_state import PlayState
 
 
 def play(ai: AI, turn=PlayState.X):
