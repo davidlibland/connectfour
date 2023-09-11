@@ -17,10 +17,17 @@ def cli():
 @click.option("--x/--o", type=bool, is_flag=True)
 def two_players(rows, cols, run_length, x):
     """A simple two player game."""
-    bgs = BatchGameState(batch_size=1, turn=PlayState.X if x else PlayState.O, num_rows=rows, num_cols=cols)
+    bgs = BatchGameState(
+        batch_size=1,
+        turn=PlayState.X if x else PlayState.O,
+        num_rows=rows,
+        num_cols=cols,
+    )
     while (winner := bgs.winners(run_length)[0]) is None:
         click.echo(bgs)
-        loc = click.prompt(f"Which column would player {bgs.turn} like to play at?", type=int)
+        loc = click.prompt(
+            f"Which column would player {bgs.turn} like to play at?", type=int
+        )
         bgs = bgs.play_at([loc])
     click.echo(bgs)
     click.echo(f"{winner} Won!")
@@ -28,5 +35,3 @@ def two_players(rows, cols, run_length, x):
 
 if __name__ == "__main__":
     cli()
-
-

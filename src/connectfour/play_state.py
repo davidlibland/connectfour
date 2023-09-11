@@ -1,7 +1,5 @@
 from enum import Enum
 
-import torch
-
 
 class PlayState(Enum):
     X = "X"

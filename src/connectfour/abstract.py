@@ -4,6 +4,7 @@ from typing import Iterator, Optional, Generic, TypeVar, Type, List, Union
 P = TypeVar("P")
 A = TypeVar("A")
 
+
 class AbsBatchGameState(ABC, Generic[A, P]):
     @abstractmethod
     def next_actions(self) -> Iterator[A]:
@@ -33,6 +34,8 @@ class AbsBatchGameState(ABC, Generic[A, P]):
 
 
 GS = TypeVar("GS", bound=AbsBatchGameState)
+
+
 class ABSGame(ABC, Generic[GS]):
     @property
     @abstractmethod

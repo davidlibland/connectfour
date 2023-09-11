@@ -24,8 +24,8 @@ nox.options.sessions = (
     # "docs", # FIXME: re-enable documentation generation
 )
 
-DEFAULT_PYTHON = "3.9"
-PYTHON_VERSIONS = ["3.7", "3.8", "3.9"]
+DEFAULT_PYTHON = "3.10"
+PYTHON_VERSIONS = ["3.10"]
 
 PACKAGE = "connectfour"
 
