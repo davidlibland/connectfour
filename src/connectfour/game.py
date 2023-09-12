@@ -18,6 +18,42 @@ MIN_WIDTH, MAX_WIDTH = 5, 10
 MIN_HEIGHT, MAX_HEIGHT = 5, 10
 
 
+class MutableBatchGameState:
+    def __init__(self, *args, **kwargs):
+        self.bgs = BatchGameState(*args, **kwargs)
+
+    def play_at(self, js: List[int], reset_games: List[bool] = None):
+        self.bgs = self.bgs.play_at(js, reset_games)
+
+    def winners(self, run_length=4) -> List[Optional[PlayState]]:
+        return self.bgs.winners(run_length)
+
+    def next_actions(self) -> torch.Tensor:
+        return self.bgs.next_actions()
+
+    def reset_games(self, reset_games):
+        self.bgs = self.bgs.reset_games(reset_games)
+
+    @property
+    def batch_size(self) -> int:
+        return self.bgs.batch_size
+
+    @property
+    def turn(self) -> PlayState:
+        return self.bgs._turn
+
+    @property
+    def board_state(self) -> torch.Tensor:
+        return self.bgs._board_state
+
+    @property
+    def cannonical_board_state(self) -> torch.Tensor:
+        if self.turn == PlayState.X:
+            return self.bgs._board_state
+        else:
+            return self.bgs._board_state[:, [0, 2, 1], :, :]
+
+
 class BatchGameState(AbsBatchGameState):
     """The connectfour game."""
 
@@ -28,6 +64,7 @@ class BatchGameState(AbsBatchGameState):
         num_rows="Random",
         num_cols="Random",
         batch_size=32,
+        device=None,
     ):
         if state is not None:
             self._batch_size, _, self._num_rows, self._num_cols = state.shape
@@ -44,6 +81,8 @@ class BatchGameState(AbsBatchGameState):
             # Choose a random turn.
             turn = random.choice([PlayState.X, PlayState.O])
         self._turn = turn
+        if device is not None:
+            self._board_state = self._board_state.to(device=device)
 
     def _blank_board(self):
         return torch.tile(
@@ -62,12 +101,12 @@ class BatchGameState(AbsBatchGameState):
         # find draws:
         num_blank_spaces = torch.sum(self._board_state[:, 0, :, :], dim=[1, 2])
         draws = num_blank_spaces == 0
-        results[np.array(draws)] = PlayState.DRAW
+        results[np.array(draws.cpu())] = PlayState.DRAW
         # find wins:
         win_types = []
         for filter in self._get_winning_filters(run_length):
             w = nn.functional.conv2d(
-                self._board_state.to(dtype=filter.dtype),
+                self._board_state.to(filter),
                 filter,
                 stride=1,
                 padding="valid",
@@ -78,7 +117,7 @@ class BatchGameState(AbsBatchGameState):
             results[np.array(wins[:, play_state_embedding_ix(p)])] = p
         return results
 
-    def next_actions(self) -> np.array:
+    def next_actions(self) -> torch.Tensor:
         # Find the columns with at least one blank entry
         blank_ix = play_state_embedding_ix(PlayState.BLANK)
         blank_space_indicator = self._board_state[:, blank_ix, :, :]
@@ -116,11 +155,27 @@ class BatchGameState(AbsBatchGameState):
         for ix, v in enumerate(play_state_embedding(self._turn)):
             new_state[torch.arange(self._batch_size), ix, is_, js] = v
 
+        if reset_games is None:
+            reset_games = num_plays == self._num_rows
+        elif isinstance(reset_games, List):
+            reset_games = torch.Tensor(reset_games).to(dtype=bool)
+
+        self._reset_games_(new_state, reset_games)
+        return BatchGameState(new_state, self._next_turn)
+
+    def _reset_games_(self, board_state, reset_games):
+        """A non-pure reset of the games. Modifies the board state"""
         # reset any other games.
-        if reset_games is not None:
-            new_state[reset_games, :, :, :] = torch.tile(
-                self._blank_board(), (np.sum(reset_games), 1, 1, 1)
+        if n_resets := int(reset_games.sum()):
+            board_state[reset_games, :, :, :] = torch.tile(
+                self._blank_board().to(device=self._board_state.device),
+                (n_resets, 1, 1, 1),
             )
+
+    def reset_games(self, reset_games) -> "BatchGameState":
+        """Reset the games"""
+        new_state = torch.clone(self._board_state)
+        self._reset_games_(new_state, reset_games)
         return BatchGameState(new_state, self._next_turn)
 
     def __hash__(self):

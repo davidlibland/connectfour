@@ -8,8 +8,9 @@ def sample_gumbel(shape):
 
 
 def sample_masked_multinomial(logits, mask, axis=None):
+    """Samples from a multinomial with the given logits, excluding masked items."""
     gumbels = sample_gumbel(logits.shape)
-    noisy_logits = logits + gumbels
+    noisy_logits = logits + gumbels.to(logits)
     min_val = torch.broadcast_to(torch.min(noisy_logits) - 1, logits.shape)
     masked_logits = torch.where(mask, min_val, noisy_logits)
     return torch.argmax(masked_logits, dim=axis)
