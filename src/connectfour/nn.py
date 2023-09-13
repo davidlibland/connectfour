@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 import math
 
 
@@ -22,3 +23,22 @@ def gaussian_neg_log_likelihood(mu, log_sig, x):
     scaled_l2 = l2_diff * torch.exp(-log_sig * 2) / 2
     log_z = -log_sig - math.log(2 * math.pi) / 2
     return scaled_l2 - log_z
+
+
+class ResidualLayer(nn.Module):
+    def __init__(self, height, width, n_channels, filter_size):
+        super().__init__()
+        self.conv1 = nn.Conv2d(
+            in_channels=n_channels,
+            out_channels=n_channels,
+            kernel_size=filter_size,
+            padding=(filter_size - 1) // 2,
+        )
+        self.ln1 = nn.LayerNorm([n_channels, height, width])
+        self.act1 = nn.GELU()
+
+    def forward(self, x):
+        z = self.conv1(x)
+        z = self.ln1(z)
+        z = self.act1(z)
+        return x + z

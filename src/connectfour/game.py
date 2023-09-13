@@ -229,5 +229,12 @@ class BatchGameState(AbsBatchGameState):
         anti_diag = torch.einsum("ij,kl->ijkl", torch.eye(3), anti_diag_)
         return [horiz, vert, diag, anti_diag]
 
+    @property
+    def cannonical_board_state(self) -> torch.Tensor:
+        if self.turn == PlayState.X:
+            return self._board_state
+        else:
+            return self._board_state[:, [0, 2, 1], :, :]
+
 
 BatchGame = ABSGame.factory(BatchGameState)

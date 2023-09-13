@@ -1,5 +1,7 @@
 """The value network"""
+import torch
 import torch.nn as nn
+from connectfour.nn import ResidualLayer
 
 
 class ValueNet(nn.Module):
@@ -9,11 +11,26 @@ class ValueNet(nn.Module):
         super().__init__(*args, **kwargs)
         self.rows = rows
         self.cols = cols
-        self.ll = nn.Linear(rows * cols * 3, 1)
+        # self.ll = nn.Linear(rows * cols * 3, 1)
+        self.layers = nn.Sequential(
+            ResidualLayer(
+                height=rows, width=cols, n_channels=3, filter_size=3
+            ),
+            ResidualLayer(
+                height=rows, width=cols, n_channels=3, filter_size=3
+            ),
+            ResidualLayer(
+                height=rows, width=cols, n_channels=3, filter_size=3
+            ),
+            ResidualLayer(
+                height=rows, width=cols, n_channels=3, filter_size=3
+            ),
+            nn.Conv2d(3, 1, 1),
+        )
 
     def forward(self, x):
         """
         x: A (batch_size, 3, rows, cols) shaped tensor
         """
-        value = self.ll(x.reshape(-1, self.rows * self.cols * 3))
-        return value
+        value = self.layers(x)
+        return torch.mean(value, dim=(1, 2, 3))
