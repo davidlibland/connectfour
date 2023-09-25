@@ -1,7 +1,10 @@
 """
 The main RL training code.
 """
+import dataclasses
 import math
+import pathlib
+import random
 from pathlib import Path
 from typing import List, Tuple, Iterator, Dict
 import pickle as pkl
@@ -9,6 +12,8 @@ import pickle as pkl
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
+import torch.nn as nn
+import yaml
 from lightning import Trainer
 from torch.optim import Optimizer, Adam
 from torch.utils.data import IterableDataset, DataLoader
@@ -40,18 +45,39 @@ class RLDataset(IterableDataset):
             yield board_state[i, ...], play_state_embedding_ix(self.bgs.turn)
 
 
+def sample_move(
+    bgs: MutableBatchGameState, policy_net: PolicyNet, board_state=None
+) -> torch.Tensor:
+    # board_state = self.bgs.cannonical_board_state
+    if board_state is None:
+        board_state = bgs.cannonical_board_state.to(device=policy_net.device)
+    logits = policy_net(board_state.to(dtype=torch.float))
+    mask = ~bgs.next_actions().to(device=logits.device)
+    moves = sample_masked_multinomial(logits, mask, axis=1)
+    return moves
+
+
+def load_policy_net(log_path):
+    model_file = pathlib.Path(log_path) / "model.pkl"
+    with open(model_file, "rb") as f:
+        model_dict = pkl.load(f)
+    full_model = ConnectFourAI(
+        **model_dict["model_hparams"], opponent_policy_net=None
+    )
+    full_model.load_state_dict(model_dict["model_state"])
+    policy_net = full_model.policy_net
+    return policy_net
+
+
 class ConnectFourAI(pl.LightningModule):
     def __init__(
         self,
-        # policy_net: nn.Module,
-        # value_net: nn.Module,
-        # opponent_policy_net: nn.Module,
-        # bgs: MutableBatchGameState,
         policy_net_kwargs: dict,
         value_net_kwargs: dict,
         lr,
         gamma,
         run_length,
+        opponent_policy_net: nn.Module,
         **kwargs
     ):
         super().__init__()
@@ -59,22 +85,18 @@ class ConnectFourAI(pl.LightningModule):
             ignore=["policy_net", "value_net", "opponent_policy_net"]
         )
         bgs = MutableBatchGameState(**kwargs)
-        # self.policy_net = policy_net
-        # self.value_net = value_net
-        # self.opponent_policy_net = opponent_policy_net
         self.policy_net = PolicyNet(**policy_net_kwargs)
         self.value_net = ValueNet(**value_net_kwargs)
-        self.opponent_policy_net = self.policy_net
+        if opponent_policy_net is None:
+            self.opponent_policy_net = self.policy_net
+        else:
+            self.opponent_policy_net = opponent_policy_net
         self.bgs = bgs
         self.play_state = PlayState.X
         self.opponent_play_state = PlayState.O
 
     def sample_move(self, policy_net, board_state) -> torch.Tensor:
-        # board_state = self.bgs.cannonical_board_state
-        logits = policy_net(board_state)
-        mask = ~self.bgs.next_actions().to(device=logits.device)
-        moves = sample_masked_multinomial(logits, mask, axis=1)
-        return moves
+        return sample_move(self.bgs, policy_net, board_state)
 
     def take_composite_move_and_get_reward_delta(
         self, board_state
@@ -87,10 +109,6 @@ class ConnectFourAI(pl.LightningModule):
         """
         # Initially, we assume that no board is a finished game (moves are allowed)
         initial_value = self.value_net(board_state).flatten()
-        # if the board is empty, the initial value should be zero:
-        empty_masks = board_state[:, 1:, :, :].sum(dim=(1, 2, 3)) == 0
-        zeros = torch.zeros_like(initial_value)
-        initial_value = torch.where(empty_masks, zeros, initial_value)
 
         # Now choose a move:
         move = self.sample_move(self.policy_net, board_state=board_state)
@@ -165,6 +183,18 @@ class ConnectFourAI(pl.LightningModule):
             "n_winners": n_winners,
         }
 
+    def eval_step(self, batch):
+        board_state, turn = batch
+        board_state = board_state.to(dtype=torch.float)
+
+        with torch.no_grad():
+            # compute the delta:
+            state_updates = self.take_composite_move_and_get_reward_delta(
+                board_state
+            )
+
+        return state_updates["reward"].mean()
+
     def training_step(self, batch):
         board_state, turn = batch
         board_state = board_state.to(dtype=torch.float)
@@ -224,44 +254,32 @@ class ConnectFourAI(pl.LightningModule):
         return optimizer
 
 
-if __name__ == "__main__":
-    # bgs = MutableBatchGameState(
-    #
-    # )
-    # policy_net = PolicyNet(rows=7, cols=7)
-    # opponent_policy_net = PolicyNet(rows=7, cols=7)
-    # value_net = ValueNet(rows=7, cols=7)
-    n_rows = 4
-    n_cols = 3
+def train_network(n_rows, n_cols, run_length, hparams, max_epochs, opponent):
     model = ConnectFourAI(
-        # bgs=bgs,
-        # policy_net=policy_net,
-        # opponent_policy_net=policy_net,
-        # value_net=value_net,
-        policy_net_kwargs=dict(rows=n_rows, cols=n_cols),
-        value_net_kwargs=dict(rows=n_rows, cols=n_cols),
-        lr=1e-3,
-        gamma=0.5,
-        run_length=3,
-        batch_size=2048,
+        opponent_policy_net=opponent,
         turn=PlayState.X,
         num_cols=n_cols,
         num_rows=n_rows,
+        run_length=run_length,
         device="mps",
+        **hparams
     )
+
     print(model.hparams)
 
     trainer = Trainer(
         accelerator="auto",
         # devices=1 if torch.cuda.is_available() else None,  # limiting got iPython runs
-        max_epochs=3000,
+        max_epochs=max_epochs,
         # val_check_interval=50,
         logger=True,
     )
 
     trainer.fit(model)
 
-    with open("model.pkl", "wb") as f:
+    log_path = Path(trainer.logger.log_dir)
+
+    with (log_path / "model.pkl").open("wb") as f:
         pkl.dump(
             {
                 "model_state": model.state_dict(),
@@ -269,13 +287,230 @@ if __name__ == "__main__":
             },
             f,
         )
-
-    log_path = Path(trainer.logger.log_dir)
     logs = log_path / "metrics.csv"
     log_df = pd.read_csv(logs).set_index("step")
     w = int(math.sqrt(len(log_df.columns)))
     h = math.ceil(len(log_df.columns) / w)
     fig, axs = plt.subplots(w, h, figsize=(4 * h, 6 * w))
     for col, ax in zip(log_df.columns, axs.flatten()):
-        log_df.plot(y=col, ax=ax)
+        log_df[col].ewm(halflife=max_epochs / 10).mean().plot(y=col, ax=ax)
+        ax.set_title(col)
     fig.savefig(log_path / "metrics.png")
+
+    return log_path
+
+
+def face_off(
+    policy_net_1: PolicyNet,
+    policy_net_2: PolicyNet,
+    run_length,
+    num_turns=100,
+    batch_size=2048,
+) -> float:
+    def play_turn(
+        bgs: MutableBatchGameState, play_state_1, play_state_2, run_length
+    ):
+
+        # Now choose a move:
+        move = sample_move(bgs, policy_net_1, board_state=None)
+
+        # Make the play:
+        bgs.play_at(move)
+
+        # Now check if the game is over:
+        def get_reward(win_state):
+            if win_state == play_state_1:
+                return 1
+            if win_state == play_state_2:
+                return -1
+            return 0
+
+        def get_win_count(win_state):
+            if win_state == play_state_1:
+                return 1
+            if win_state == play_state_2:
+                return 1
+            return 0
+
+        winners = bgs.winners(run_length=run_length)
+        # compute the rewards:
+        reward = torch.Tensor(
+            [get_reward(win_state) for win_state in winners]
+        ).to(device=policy_net_1.device)
+        n_winners = torch.Tensor(
+            [get_win_count(win_state) for win_state in winners]
+        )
+        # reset any dead games:
+        resets = [win_state is not None for win_state in winners]
+
+        # Let the opponent move:
+        opponent_move = sample_move(bgs=bgs, policy_net=policy_net_2)
+        bgs.play_at(opponent_move, resets)
+
+        # Now check if the game is over:
+        winners = bgs.winners(run_length=run_length)
+        # compute the rewards:
+        reward += torch.Tensor(
+            [get_reward(win_state) for win_state in winners]
+        ).to(device=policy_net_1.device)
+        n_winners += torch.Tensor(
+            [get_win_count(win_state) for win_state in winners]
+        )
+        # reset any dead games:
+        resets = [win_state is not None for win_state in winners]
+
+        # Get the output_value, ignoring any resets:
+        reset_masks = torch.Tensor(resets).to(
+            device=policy_net_1.device, dtype=torch.bool
+        )
+
+        # Finally, reset any dead games:
+        bgs.reset_games(reset_masks)
+
+        return reward.mean()
+
+    bgs = MutableBatchGameState(
+        num_rows=n_rows,
+        num_cols=n_cols,
+        batch_size=batch_size,
+        device=policy_net_1.device,
+        turn=PlayState.X,
+    )
+    total_reward = 0
+    for _ in range(num_turns):
+        total_reward += play_turn(
+            bgs,
+            play_state_1=PlayState.X,
+            play_state_2=PlayState.O,
+            run_length=run_length,
+        )
+    return float(total_reward / num_turns)
+
+
+@dataclasses.dataclass
+class MatchData:
+    """models: List of model paths"""
+
+    models: List[str]
+    """Matches: model_path, model_path, reward"""
+    matches: Tuple[str, str, float]
+
+    def top_performers(self):
+        rewards_per_model = {model: [] for model in self.models}
+        for model_1, model_2, reward in self.matches:
+            rewards_per_model[model_1].append(reward)
+            rewards_per_model[model_2].append(-reward)
+        reward_per_model = {
+            model: sum(rewards) / len(rewards) if rewards else 0
+            for model, rewards in rewards_per_model.items()
+        }
+        top_model = sorted(self.models, key=reward_per_model.get, reverse=True)
+        return top_model
+
+
+def bootstrap_models(
+    n_rows,
+    n_cols,
+    run_length,
+    hparams,
+    max_epochs,
+    num_matches=3,
+    match_file_path=None,
+    faceoff_turns=None,
+):
+    if faceoff_turns is None:
+        faceoff_turns = max(max_epochs // 3, 10)
+    match_file_path = pathlib.Path(match_file_path)
+    if match_file_path.exists():
+        with match_file_path.open("r") as f:
+            match_data = MatchData(**yaml.safe_load(f))
+    else:
+        log_path = train_network(
+            n_rows=n_rows,
+            n_cols=n_cols,
+            run_length=run_length,
+            hparams=hparams,
+            max_epochs=max_epochs,
+            opponent=None,
+        )
+        match_data = MatchData(models=[str(log_path)], matches=[])
+    for _ in range(num_matches):
+        opponent_path = match_data.top_performers()[0]
+        opponent_policy_net = load_policy_net(opponent_path)
+
+        log_path = train_network(
+            n_rows=n_rows,
+            n_cols=n_cols,
+            run_length=run_length,
+            hparams=hparams,
+            max_epochs=max_epochs,
+            opponent=opponent_policy_net,
+        )
+        policy_net = load_policy_net(log_path)
+
+        # Toss up for first player:
+        if random.choice([True, False]):
+            reward = face_off(
+                policy_net_1=policy_net,
+                policy_net_2=opponent_policy_net,
+                run_length=run_length,
+                num_turns=faceoff_turns,
+            )
+        else:
+            reward = -face_off(
+                policy_net_2=policy_net,
+                policy_net_1=opponent_policy_net,
+                run_length=run_length,
+                num_turns=faceoff_turns,
+            )
+        match_data.models.append(str(log_path))
+        match_data.matches.append([str(log_path), str(opponent_path), reward])
+    with match_file_path.open("w") as f:
+        yaml.dump(dataclasses.asdict(match_data), f)
+
+
+if __name__ == "__main__":
+    hparams = {
+        "policy_net_kwargs": dict(run_lengths=[3]),
+        "value_net_kwargs": dict(run_lengths=[3]),
+        "lr": 1e-3,
+        "gamma": 0.8,
+        "batch_size": 2048,
+    }
+
+    n_rows = 4
+    n_cols = 3
+    run_length = 3
+
+    bootstrap_models(
+        n_rows=n_rows,
+        n_cols=n_cols,
+        num_matches=3,
+        run_length=run_length,
+        hparams=hparams,
+        max_epochs=5,
+        match_file_path="matches.yml",
+    )
+
+    # log_path = train_network(
+    #     n_rows=n_rows,
+    #     n_cols=n_cols,
+    #     run_length=run_length,
+    #     hparams=hparams,
+    #     max_epochs=30,
+    #     opponent=None,
+    # )
+    # print(f"Model saved in {log_path}")
+    #
+    # model_file = log_path / "model.pkl"
+    # with open(model_file, "rb") as f:
+    #     model_dict = pkl.load(f)
+    #     full_model = ConnectFourAI(**model_dict["model_hparams"], opponent_policy_net=None)
+    #     full_model.load_state_dict(model_dict["model_state"])
+    #     policy_net = full_model.policy_net
+    #
+    # policy_net_1 = policy_net
+    # policy_net_2 = full_model.opponent_policy_net
+    #
+    # reward = face_off(policy_net_1, policy_net_2, run_length)
+    # print(f"Avg reward: {reward}")

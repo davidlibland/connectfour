@@ -13,6 +13,7 @@ from connectfour.play_state import (
     play_state_embedding,
     play_state_extraction,
 )
+from connectfour.utils import get_winning_filters
 
 MIN_WIDTH, MAX_WIDTH = 5, 10
 MIN_HEIGHT, MAX_HEIGHT = 5, 10
@@ -104,7 +105,7 @@ class BatchGameState(AbsBatchGameState):
         results[np.array(draws.cpu())] = PlayState.DRAW
         # find wins:
         win_types = []
-        for filter in self._get_winning_filters(run_length):
+        for filter in get_winning_filters(run_length):
             w = nn.functional.conv2d(
                 self._board_state.to(filter),
                 filter,
@@ -212,22 +213,6 @@ class BatchGameState(AbsBatchGameState):
 
     def as_array(self):
         return self._board_state
-
-    def _get_winning_filters(self, run_length: int = 4):
-        # get horizontal filter
-        horiz = torch.einsum(
-            "ij,kl->ijkl", torch.eye(3), torch.ones([1, run_length])
-        )
-        # get vertical filter
-        vert = torch.einsum(
-            "ij,kl->ijkl", torch.eye(3), torch.ones([run_length, 1])
-        )
-        # get diagonal filter
-        diag = torch.einsum("ij,kl->ijkl", torch.eye(3), torch.eye(run_length))
-        # get anti-diagonal filter
-        anti_diag_ = torch.flip(torch.eye(run_length), (1,))
-        anti_diag = torch.einsum("ij,kl->ijkl", torch.eye(3), anti_diag_)
-        return [horiz, vert, diag, anti_diag]
 
     @property
     def cannonical_board_state(self) -> torch.Tensor:

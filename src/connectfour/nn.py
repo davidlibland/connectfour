@@ -1,6 +1,9 @@
 import torch
 from torch import nn
+import torch.nn.functional as F
 import math
+
+from connectfour.utils import get_winning_filters
 
 
 def sample_gumbel(shape):
@@ -25,20 +28,70 @@ def gaussian_neg_log_likelihood(mu, log_sig, x):
     return scaled_l2 - log_z
 
 
+class LayerNorm2d(nn.LayerNorm):
+    r"""LayerNorm for channels_first tensors with 2d spatial dimensions (ie N, C, H, W)."""
+
+    def __init__(self, normalized_shape, eps=1e-6):
+        super().__init__(normalized_shape, eps=eps)
+
+    def forward(self, x) -> torch.Tensor:
+        return F.layer_norm(
+            x.permute(0, 2, 3, 1),
+            self.normalized_shape,
+            self.weight,
+            self.bias,
+            self.eps,
+        ).permute(0, 3, 1, 2)
+
+
 class ResidualLayer(nn.Module):
-    def __init__(self, height, width, n_channels, filter_size):
+    def __init__(self, in_channels, filter_size):
         super().__init__()
-        self.conv1 = nn.Conv2d(
-            in_channels=n_channels,
-            out_channels=n_channels,
-            kernel_size=filter_size,
-            padding=(filter_size - 1) // 2,
+        self.network = nn.Sequential(
+            *[
+                nn.Conv2d(
+                    in_channels=in_channels,
+                    out_channels=in_channels,
+                    kernel_size=filter_size,
+                    padding=(filter_size - 1) // 2,
+                ),
+                LayerNorm2d(in_channels),
+                nn.GELU(),
+            ]
+            * 2
         )
-        self.ln1 = nn.LayerNorm([n_channels, height, width])
-        self.act1 = nn.GELU()
 
     def forward(self, x):
-        z = self.conv1(x)
-        z = self.ln1(z)
-        z = self.act1(z)
-        return x + z
+        return x + self.network(x)
+
+
+class ConnectFourFeatures(nn.Module):
+    def __init__(self, *run_lengths):
+        super().__init__()
+        filters = []
+        for l in run_lengths:
+            filters.extend(get_winning_filters(l))
+        self.filter_names = []
+        for i, filter in enumerate(filters):
+            filter_name = f"filter_{i}"
+            self.register_buffer(filter_name, filter)
+            self.filter_names.append(filter_name)
+
+    @staticmethod
+    def compute_out_channels(in_channels, *run_lengths):
+        return in_channels + 4 * 3 * len(run_lengths)
+
+    def forward(self, x):
+        stacks = [x]
+        for filter_name in self.filter_names:
+            filter = self.get_buffer(filter_name)
+            filter_sizes = filter.shape[2:]
+            padding = tuple((n - 1) // 2 for n in filter_sizes)
+            w = nn.functional.conv2d(
+                x,
+                filter,
+                stride=1,
+                padding=padding,
+            )
+            stacks.append(w)
+        return torch.concat(stacks, 1)
