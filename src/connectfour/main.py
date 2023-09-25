@@ -1,14 +1,16 @@
 """The main entry point"""
+import pathlib
+
 import click
 import pickle as pkl
+
+import yaml
 
 from connectfour.game import BatchGameState
 from connectfour.nn import sample_masked_multinomial
 from connectfour.play_state import PlayState
-from connectfour.policy import PolicyNet
 
-from connectfour.rl_trainer import ConnectFourAI
-from connectfour.value_net import ValueNet
+from connectfour.io import MatchData, load_policy_net
 
 
 @click.group()
@@ -44,14 +46,17 @@ def two_players(rows, cols, run_length, x):
 # @click.option("--cols", "-c", type=int, default=7)
 # @click.option("--run-length", "-l", type=int, default=4)
 @click.option("--x/--o", type=bool, is_flag=True)
-@click.option("--model-file", "-f", type=click.Path(), default="model.pkl")
-def one_player(x, model_file):
+@click.option("--model-file", "-f", type=click.Path(), default=None)
+@click.option("--match-file", "-m", type=click.Path(), default="matches.yml")
+def one_player(x, model_file, match_file):
     """A simple two player game."""
-    with open(model_file, "rb") as f:
+    if match_file is not None:
+        with open(match_file, "r") as f:
+            match_data = MatchData(**yaml.safe_load(f))
+        model_file = match_data.top_performers()[0]
+    with open(f"{model_file}/model.pkl", "rb") as f:
         model_dict = pkl.load(f)
-        full_model = ConnectFourAI(**model_dict["model_hparams"])
-        full_model.load_state_dict(model_dict["model_state"])
-        policy_net = full_model.policy_net
+    policy_net = load_policy_net(model_file)
 
     bgs = BatchGameState(
         batch_size=1,
