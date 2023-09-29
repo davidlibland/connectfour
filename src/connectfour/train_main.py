@@ -1,13 +1,16 @@
 import dataclasses
+import itertools
 import math
 from pathlib import Path
 import pickle as pkl
 import random
 
+import numpy as np
 import pandas as pd
 import torch
 import yaml
 from lightning import Trainer
+from lightning.pytorch.callbacks import StochasticWeightAveraging
 from matplotlib import pyplot as plt
 
 from connectfour.game import MutableBatchGameState
@@ -26,6 +29,7 @@ def train_network(model: ConnectFourAI, max_epochs):
         max_epochs=max_epochs,
         # val_check_interval=50,
         logger=True,
+        callbacks=[StochasticWeightAveraging(swa_lrs=1e-2)],
     )
 
     trainer.fit(model)
@@ -197,6 +201,10 @@ def bootstrap_models(
     num_matches=3,
     match_file_path=None,
     faceoff_turns=None,
+    improve_odds=0.9,
+    n_test_opponents=5,
+    train_last=False,
+    run_challenges=True,
 ):
     if faceoff_turns is None:
         faceoff_turns = max(max_epochs // 3, 10)
@@ -215,9 +223,14 @@ def bootstrap_models(
         )
         match_data = MatchData(models=[str(log_path)], matches=[])
     for _ in range(num_matches):
-        if random.choice([True, False]):
+        new_model = not match_data.matches or (
+            np.random.choice([False, True], p=[improve_odds, 1 - improve_odds])
+            and not train_last
+        )
+        models = match_data.top_performers(eps=0.1)
+        if new_model:
             # Train a new network:
-            opponent_path = match_data.top_performers()[0]
+            opponent_path = models[0]
             opponent_policy_net = load_policy_net(opponent_path)
             print(f"Training a new network against {opponent_path}")
 
@@ -232,11 +245,14 @@ def bootstrap_models(
             policy_net = load_policy_net(log_path)
         else:
             # Improve an existing network:
-            models = match_data.top_performers(eps=0.25)
-            my_path = models[0]
-            my_ai = load_cfai(my_path)
+            if train_last:
+                my_path = match_data.models[-1]
+                opponent_path = my_path
+            else:
+                my_path = models[0]
+                opponent_path = models[1]
 
-            opponent_path = models[1]
+            my_ai = load_cfai(my_path)
             opponent_policy_net = load_policy_net(opponent_path)
             print(f"Improving network: {my_path} against {opponent_path}")
 
@@ -245,40 +261,83 @@ def bootstrap_models(
             log_path = train_network(my_ai, max_epochs=max_epochs)
             policy_net = load_policy_net(log_path)
 
-        # Toss up for first player:
-        if random.choice([True, False]):
-            reward = face_off(
-                policy_net_1=policy_net,
-                policy_net_2=opponent_policy_net,
-                run_length=run_length,
-                num_turns=faceoff_turns,
-            )
-        else:
-            reward = -face_off(
-                policy_net_2=policy_net,
-                policy_net_1=opponent_policy_net,
-                run_length=run_length,
-                num_turns=faceoff_turns,
-            )
-        print(f"Model saved at: {log_path}, with avg reward: {reward}")
+        # Add the model to the match data:
         match_data.models.append(str(log_path))
-        match_data.matches.append([str(log_path), str(opponent_path), reward])
+
+        total_reward = 0
+        # Test against some top opponents:
+        for i, opponent_path in enumerate(models[:n_test_opponents]):
+            print(f"Running match {i+1} of {n_test_opponents}")
+            opponent_policy_net = load_policy_net(opponent_path)
+            # Toss up for first player:
+            if random.choice([True, False]):
+                reward = face_off(
+                    policy_net_1=policy_net,
+                    policy_net_2=opponent_policy_net,
+                    run_length=run_length,
+                    num_turns=faceoff_turns,
+                )
+            else:
+                reward = -face_off(
+                    policy_net_2=policy_net,
+                    policy_net_1=opponent_policy_net,
+                    run_length=run_length,
+                    num_turns=faceoff_turns,
+                )
+            match_data.matches.append(
+                [str(log_path), str(opponent_path), reward]
+            )
+            total_reward += reward
+
+        print(
+            f"Model saved at: {log_path}, with avg reward: {total_reward/n_test_opponents}"
+        )
+
+        # Run some random matches between top players:
+        if run_challenges:
+            challenge_matches = itertools.islice(
+                itertools.combinations(models, 2), n_test_opponents
+            )
+            for i, (path_1, path_2) in enumerate(challenge_matches):
+                print(f"Running random match {i+1} of {n_test_opponents}")
+                policy_net = load_policy_net(path_1)
+                opponent_policy_net = load_policy_net(path_2)
+                # Toss up for first player:
+                if random.choice([True, False]):
+                    reward = face_off(
+                        policy_net_1=policy_net,
+                        policy_net_2=opponent_policy_net,
+                        run_length=run_length,
+                        num_turns=faceoff_turns,
+                    )
+                else:
+                    reward = -face_off(
+                        policy_net_2=policy_net,
+                        policy_net_1=opponent_policy_net,
+                        run_length=run_length,
+                        num_turns=faceoff_turns,
+                    )
+                match_data.matches.append(
+                    [str(log_path), str(opponent_path), reward]
+                )
+
         with match_file_path.open("w") as f:
             yaml.dump(dataclasses.asdict(match_data), f)
 
 
 if __name__ == "__main__":
     hparams = {
-        "policy_net_kwargs": dict(run_lengths=[3]),
-        "value_net_kwargs": dict(run_lengths=[3]),
-        "lr": 3e-3,
+        "policy_net_kwargs": dict(run_lengths=[5, 3]),
+        "value_net_kwargs": dict(run_lengths=[5, 3]),
+        "lr": 1e-3,
         "gamma": 0.8,
         "batch_size": 2048,
+        "rel_value_weight": 3,
     }
 
-    n_rows = 4
-    n_cols = 3
-    run_length = 3
+    n_rows = 6
+    n_cols = 7
+    run_length = 4
 
     bootstrap_models(
         n_rows=n_rows,
@@ -286,6 +345,9 @@ if __name__ == "__main__":
         num_matches=100,
         run_length=run_length,
         hparams=hparams,
-        max_epochs=100,
+        max_epochs=300,
         match_file_path="matches.yml",
+        faceoff_turns=30,
+        train_last=False,
+        run_challenges=False,
     )

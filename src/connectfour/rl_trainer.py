@@ -55,6 +55,7 @@ class ConnectFourAI(pl.LightningModule):
         lr,
         gamma,
         run_length,
+        rel_value_weight,
         opponent_policy_net: nn.Module,
         **kwargs
     ):
@@ -199,7 +200,9 @@ class ConnectFourAI(pl.LightningModule):
             -I * delta * torch.diag(self.policy_net(board_state)[:, move])
         )
 
-        total_loss = value_loss + policy_loss
+        total_loss = (
+            self.hparams["rel_value_weight"] * value_loss + policy_loss
+        )
 
         self.logger.log_metrics(
             {
