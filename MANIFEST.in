@@ -1,0 +1,3 @@
+include VERSION
+global-include *.pyi
+global-include *.typed

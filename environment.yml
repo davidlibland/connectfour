@@ -1,0 +1,50 @@
+name: connectfour-dev
+channels:
+  - pytorch
+  - conda-forge
+  - default
+
+dependencies:
+  # environment management
+  - pip
+
+  # core dependencies
+  - importlib-metadata>=1.5.0 # required if python < 3.8
+  # TODO: add your dependencies here
+
+  # demo package requirements
+  # TODO: remove/modify these as necessary when replacing demo code
+  - typing-extensions>=3.7.4.3 # required if python < 3.8
+  - numpy>=1.19.1
+  - pandas>=1.0.4
+  - pydantic>=1.6.1,<1.9  # test additional constraints
+  - pytables>=3.4.2
+  - click>=7.1
+
+  # pytorch related stuff
+  - pytorch >= 2.0.0
+  - lightning >= 2.0.0
+
+  # testing and CI tools
+  - nox>=2019.8.20
+  - packaging>=20.0
+  - dunamai>=1.0.0
+  - mypy
+  - black~=22.0
+  - isort>=5.7.0
+  - pytest>=5.3.5
+  - pytest-cov>=2.8.1
+  - pylint>=2.4.4
+  - hypothesis[numpy]>=5.6.0
+
+  # mypy types
+
+  # packaging
+  - twine
+  - build
+
+  - pip:
+    - pylint-junit>=0.2.0
+    # private sources below
+    #- dummy-package (if installing from pypi)
+    #- package @ git+ssh://git@github.com/davidlibland/private-package.git@hash (if installing using ssh)

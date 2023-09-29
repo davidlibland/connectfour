@@ -1,0 +1,24 @@
+# This file is auto-generated from environment.yml, do not modify.
+# See that file for comments about the need/usage of each dependency.
+
+pip
+importlib-metadata>=1.5.0
+typing-extensions>=3.7.4.3
+numpy>=1.19.1
+pandas>=1.0.4
+pydantic<1.9,>=1.6.1
+tables>=3.4.2
+click>=7.1
+nox>=2019.8.20
+packaging>=20.0
+dunamai>=1.0.0
+mypy
+black~=22.0
+isort>=5.7.0
+pytest>=5.3.5
+pytest-cov>=2.8.1
+pylint>=2.4.4
+hypothesis[numpy]>=5.6.0
+twine
+build
+pylint-junit>=0.2.0
