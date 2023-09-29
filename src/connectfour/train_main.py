@@ -10,7 +10,6 @@ import pandas as pd
 import torch
 import yaml
 from lightning import Trainer
-from lightning.pytorch.callbacks import StochasticWeightAveraging
 from matplotlib import pyplot as plt
 
 from connectfour.game import MutableBatchGameState
@@ -29,7 +28,6 @@ def train_network(model: ConnectFourAI, max_epochs):
         max_epochs=max_epochs,
         # val_check_interval=50,
         logger=True,
-        callbacks=[StochasticWeightAveraging(swa_lrs=1e-2)],
     )
 
     trainer.fit(model)
@@ -67,6 +65,7 @@ def train_new_network(
         num_rows=n_rows,
         run_length=run_length,
         device="mps",
+        max_epochs=max_epochs,
         **hparams,
     )
 
@@ -112,6 +111,8 @@ def face_off(
     num_turns=100,
     batch_size=2048,
 ) -> float:
+    device = next(policy_net_1.parameters()).device
+
     def play_turn(
         bgs: MutableBatchGameState, play_state_1, play_state_2, run_length
     ):
@@ -141,7 +142,7 @@ def face_off(
         # compute the rewards:
         reward = torch.Tensor(
             [get_reward(win_state) for win_state in winners]
-        ).to(device=policy_net_1.device)
+        ).to(device=device)
         n_winners = torch.Tensor(
             [get_win_count(win_state) for win_state in winners]
         )
@@ -157,7 +158,7 @@ def face_off(
         # compute the rewards:
         reward += torch.Tensor(
             [get_reward(win_state) for win_state in winners]
-        ).to(device=policy_net_1.device)
+        ).to(device=device)
         n_winners += torch.Tensor(
             [get_win_count(win_state) for win_state in winners]
         )
@@ -165,9 +166,7 @@ def face_off(
         resets = [win_state is not None for win_state in winners]
 
         # Get the output_value, ignoring any resets:
-        reset_masks = torch.Tensor(resets).to(
-            device=policy_net_1.device, dtype=torch.bool
-        )
+        reset_masks = torch.Tensor(resets).to(device=device, dtype=torch.bool)
 
         # Finally, reset any dead games:
         bgs.reset_games(reset_masks)
@@ -178,7 +177,7 @@ def face_off(
         num_rows=n_rows,
         num_cols=n_cols,
         batch_size=batch_size,
-        device=policy_net_1.device,
+        device=device,
         turn=PlayState.X,
     )
     total_reward = 0
@@ -329,10 +328,11 @@ if __name__ == "__main__":
     hparams = {
         "policy_net_kwargs": dict(run_lengths=[5, 3]),
         "value_net_kwargs": dict(run_lengths=[5, 3]),
-        "lr": 1e-3,
-        "gamma": 0.8,
+        "policy_lr": 1e-3,
+        "value_lr": 3e-3,
+        "gamma": 0.9,
         "batch_size": 2048,
-        "rel_value_weight": 3,
+        "value_net_burn_in_frac": 0.1,
     }
 
     n_rows = 6
@@ -345,9 +345,9 @@ if __name__ == "__main__":
         num_matches=100,
         run_length=run_length,
         hparams=hparams,
-        max_epochs=300,
+        max_epochs=1000,
         match_file_path="matches.yml",
         faceoff_turns=30,
-        train_last=False,
+        train_last=True,
         run_challenges=False,
     )

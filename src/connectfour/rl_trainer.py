@@ -8,6 +8,11 @@ import torch.nn as nn
 from torch.optim import Optimizer, Adam
 from torch.utils.data import IterableDataset, DataLoader
 
+from torch.optim.swa_utils import AveragedModel
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR
+from torch.optim.swa_utils import SWALR
+
+
 from connectfour.nn import sample_masked_multinomial
 
 import lightning.pytorch as pl
@@ -40,7 +45,9 @@ def sample_move(
 ) -> torch.Tensor:
     # board_state = self.bgs.cannonical_board_state
     if board_state is None:
-        board_state = bgs.cannonical_board_state.to(device=policy_net.device)
+        board_state = bgs.cannonical_board_state.to(
+            device=next(policy_net.parameters()).device
+        )
     logits = policy_net(board_state.to(dtype=torch.float))
     mask = ~bgs.next_actions().to(device=logits.device)
     moves = sample_masked_multinomial(logits, mask, axis=1)
@@ -52,10 +59,12 @@ class ConnectFourAI(pl.LightningModule):
         self,
         policy_net_kwargs: dict,
         value_net_kwargs: dict,
-        lr,
+        policy_lr,
+        value_lr,
         gamma,
         run_length,
-        rel_value_weight,
+        max_epochs,
+        value_net_burn_in_frac,
         opponent_policy_net: nn.Module,
         **kwargs
     ):
@@ -64,8 +73,10 @@ class ConnectFourAI(pl.LightningModule):
             ignore=["policy_net", "value_net", "opponent_policy_net"]
         )
         bgs = MutableBatchGameState(**kwargs)
-        self.policy_net = PolicyNet(**policy_net_kwargs)
-        self.value_net = ValueNet(**value_net_kwargs)
+        self._policy_net = PolicyNet(**policy_net_kwargs)
+        self._value_net = ValueNet(**value_net_kwargs)
+        self.policy_net = AveragedModel(PolicyNet(**policy_net_kwargs))
+        self.value_net = AveragedModel(ValueNet(**value_net_kwargs))
         if opponent_policy_net is None:
             self.opponent_policy_net = self.policy_net
         else:
@@ -73,6 +84,11 @@ class ConnectFourAI(pl.LightningModule):
         self.bgs = bgs
         self.play_state = PlayState.X
         self.opponent_play_state = PlayState.O
+        self.automatic_optimization = False
+        self.swa_start = self.hparams.max_epochs // 10
+        self.policy_start = int(
+            self.hparams.max_epochs * self.hparams.value_net_burn_in_frac
+        )
 
     def sample_move(self, policy_net, board_state) -> torch.Tensor:
         return sample_move(self.bgs, policy_net, board_state)
@@ -153,12 +169,15 @@ class ConnectFourAI(pl.LightningModule):
         self.bgs.reset_games(reset_masks)
 
         # Ok. Compute and return the delta:
-        delta = reward + final_value * self.hparams["gamma"] - initial_value
+        assert (
+            ~(reward != 0) | (final_value == 0)
+        ).all(), "reward != 0 -> final_value == 0"
+        amortized_reward = reward + final_value * self.hparams["gamma"]
 
         return {
             "move": move,
-            "delta": delta,
             "reward": reward,
+            "amortized_reward": amortized_reward,
             "n_winners": n_winners,
         }
 
@@ -175,8 +194,12 @@ class ConnectFourAI(pl.LightningModule):
         return state_updates["reward"].mean()
 
     def training_step(self, batch):
+        p_opt, v_opt = self.optimizers()
+        p_sch, v_sch = self.lr_schedulers()
+
         board_state, turn = batch
         board_state = board_state.to(dtype=torch.float)
+        initial_reward = self._value_net(board_state).flatten()
 
         with torch.no_grad():
             # compute the delta:
@@ -184,7 +207,7 @@ class ConnectFourAI(pl.LightningModule):
                 board_state
             )
             move = state_updates["move"]
-            delta = state_updates["delta"]
+            amortized_reward = state_updates["amortized_reward"]
 
             # compute the gammas:
             I = torch.pow(
@@ -192,21 +215,48 @@ class ConnectFourAI(pl.LightningModule):
                 board_state[:, 1:, :, :].sum(dim=(1, 2, 3)),
             )
 
+        temp = 1
         # get the value loss:
-        value_loss = -delta * self.value_net(board_state).flatten()
+
+        delta = amortized_reward - initial_reward
+        value_loss = 0.5 * delta**2
+        value_loss_rew = value_loss * torch.exp(
+            torch.clamp(0.5 * (value_loss**2).detach(), max=temp)
+            / (temp + 1)
+        )
 
         # compute the policy loss:
         policy_loss = (
-            -I * delta * torch.diag(self.policy_net(board_state)[:, move])
+            -I
+            * delta.detach()
+            * torch.diag(self._policy_net(board_state)[:, move])
+        )
+        policy_loss_rew = policy_loss * torch.exp(
+            torch.clamp(policy_loss.detach(), max=temp) / (temp + 1)
         )
 
-        total_loss = (
-            self.hparams["rel_value_weight"] * value_loss + policy_loss
-        )
+        # Optimize the value net:
+        v_opt.zero_grad()
+        self.manual_backward(value_loss_rew.mean())
+        nn.utils.clip_grad_norm_(self._value_net.parameters(), 1.0)
+        v_opt.step()
+        if self.current_epoch > self.swa_start:
+            self.value_net.update_parameters(self._value_net)
+        v_sch.step()
+
+        if self.current_epoch > self.policy_start:
+            # Optimize the policy net:
+            p_opt.zero_grad()
+            self.manual_backward(policy_loss_rew.mean())
+            nn.utils.clip_grad_norm_(self._policy_net.parameters(), 1.0)
+            p_opt.step()
+            if self.current_epoch > self.swa_start + self.policy_start:
+                self.policy_net.update_parameters(self._policy_net)
+            p_sch.step()
 
         self.logger.log_metrics(
             {
-                "train_loss": total_loss.mean(),
+                "train_loss": (value_loss + policy_loss).mean(),
                 "reward": state_updates["reward"].mean(),
                 "avg_finishes": state_updates["n_winners"].mean(),
                 "value_loss_proxy": value_loss.mean(),
@@ -214,7 +264,6 @@ class ConnectFourAI(pl.LightningModule):
                 "policy_loss": policy_loss.mean(),
             }
         )
-        return total_loss.mean()
 
     def __dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences."""
@@ -231,5 +280,40 @@ class ConnectFourAI(pl.LightningModule):
 
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
-        optimizer = Adam(self.parameters(), lr=self.hparams.lr)
-        return optimizer
+        policy_optimizer = Adam(
+            self._policy_net.parameters(), lr=self.hparams.policy_lr
+        )
+        policy_scheduler = {
+            "scheduler": SequentialLR(
+                policy_optimizer,
+                [
+                    CosineAnnealingLR(
+                        policy_optimizer, T_max=self.hparams.max_epochs
+                    ),
+                    SWALR(policy_optimizer, swa_lr=0.05),
+                ],
+                milestones=[self.swa_start + self.policy_start],
+            ),
+            "interval": "epoch",
+        }
+
+        value_optimizer = Adam(
+            self._value_net.parameters(), lr=self.hparams.value_lr
+        )
+        value_scheduler = {
+            "scheduler": SequentialLR(
+                value_optimizer,
+                [
+                    CosineAnnealingLR(
+                        value_optimizer, T_max=self.hparams.max_epochs
+                    ),
+                    SWALR(value_optimizer, swa_lr=0.05),
+                ],
+                milestones=[self.swa_start],
+            ),
+            "interval": "epoch",
+        }
+        return [policy_optimizer, value_optimizer], [
+            policy_scheduler,
+            value_scheduler,
+        ]

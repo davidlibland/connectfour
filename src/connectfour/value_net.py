@@ -33,4 +33,5 @@ class ValueNet(nn.Module):
         empty_masks = x[:, 1:, :, :].sum(dim=(1, 2, 3)) == 0
         zeros = torch.zeros_like(value)
         value = torch.where(empty_masks, zeros, value)
-        return value
+        # pass the reward through a tanh - it should never exceed the true reward in [-1, 1]
+        return torch.tanh(value)
