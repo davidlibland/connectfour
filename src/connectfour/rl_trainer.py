@@ -5,11 +5,11 @@ from typing import List, Tuple, Iterator, Dict
 
 import torch
 import torch.nn as nn
-from torch.optim import Optimizer, Adam
+from torch.optim import Optimizer, AdamW
 from torch.utils.data import IterableDataset, DataLoader
 
 from torch.optim.swa_utils import AveragedModel
-from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, ConstantLR
 from torch.optim.swa_utils import SWALR
 
 
@@ -21,6 +21,7 @@ from connectfour.game import MutableBatchGameState
 from connectfour.play_state import PlayState, play_state_embedding_ix
 from connectfour.policy import PolicyNet
 from connectfour.value_net import ValueNet
+from connectfour.embedding_net import EmbeddingNet
 
 
 class RLDataset(IterableDataset):
@@ -59,12 +60,14 @@ class ConnectFourAI(pl.LightningModule):
         self,
         policy_net_kwargs: dict,
         value_net_kwargs: dict,
+        embedding_net_kwargs: dict,
         policy_lr,
         value_lr,
         gamma,
         run_length,
         max_epochs,
         value_net_burn_in_frac,
+        weight_decay,
         opponent_policy_net: nn.Module,
         **kwargs
     ):
@@ -73,17 +76,36 @@ class ConnectFourAI(pl.LightningModule):
             ignore=["policy_net", "value_net", "opponent_policy_net"]
         )
         bgs = MutableBatchGameState(**kwargs)
-        self._policy_net = PolicyNet(**policy_net_kwargs)
-        self._value_net = ValueNet(**value_net_kwargs)
-        self.policy_net = AveragedModel(PolicyNet(**policy_net_kwargs))
-        self.value_net = AveragedModel(ValueNet(**value_net_kwargs))
+        out_channels = embedding_net_kwargs["latent_dim"]
+        kernel_size = embedding_net_kwargs["kernel_size"]
+        depth = embedding_net_kwargs["depth"]
+        self._embedding = EmbeddingNet(
+            kernel_size=kernel_size, out_channels=out_channels, depth=depth
+        )
+        self._policy_net = PolicyNet(embedding=self._embedding, **policy_net_kwargs)
+        self._value_net = ValueNet(embedding=self._embedding, **value_net_kwargs)
+        self.policy_net = AveragedModel(self._policy_net)
+        self.value_net = AveragedModel(self._value_net)
         if opponent_policy_net is None:
             self.opponent_policy_net = self.policy_net
         else:
             self.opponent_policy_net = opponent_policy_net
         self.bgs = bgs
-        self.play_state = PlayState.X
-        self.opponent_play_state = PlayState.O
+        play_first = False
+        if play_first:
+            self.play_state = PlayState.X
+            self.opponent_play_state = PlayState.O
+        else:
+            self.play_state = PlayState.O
+            self.opponent_play_state = PlayState.X
+            # Let the opponent move:
+            board_state = self.bgs.cannonical_board_state.to(
+                next(self.opponent_policy_net.parameters()).device
+            )
+            opponent_move = self.sample_move(
+                self.opponent_policy_net, board_state=board_state
+            )
+            self.bgs.play_at(opponent_move)
         self.automatic_optimization = False
         self.swa_start = self.hparams.max_epochs // 10
         self.policy_start = int(
@@ -102,11 +124,8 @@ class ConnectFourAI(pl.LightningModule):
             R +\gamma v(new_state) - v(old_state)
         is returned
         """
-        # Initially, we assume that no board is a finished game (moves are allowed)
-        initial_value = self.value_net(board_state).flatten()
-
-        # Now choose a move:
-        move = self.sample_move(self.policy_net, board_state=board_state)
+        # Choose a move:
+        move = self.sample_move(self._policy_net, board_state=board_state)
 
         # Make the play:
         self.bgs.play_at(move)
@@ -129,12 +148,10 @@ class ConnectFourAI(pl.LightningModule):
 
         winners = self.bgs.winners(run_length=self.hparams["run_length"])
         # compute the rewards:
-        reward = torch.Tensor(
-            [get_reward(win_state) for win_state in winners]
-        ).to(board_state)
-        n_winners = torch.Tensor(
-            [get_win_count(win_state) for win_state in winners]
+        reward = torch.Tensor([get_reward(win_state) for win_state in winners]).to(
+            board_state
         )
+        n_winners = torch.Tensor([get_win_count(win_state) for win_state in winners])
         # reset any dead games:
         resets = [win_state is not None for win_state in winners]
 
@@ -148,36 +165,45 @@ class ConnectFourAI(pl.LightningModule):
         # Now check if the game is over:
         winners = self.bgs.winners(run_length=self.hparams["run_length"])
         # compute the rewards:
-        reward += torch.Tensor(
-            [get_reward(win_state) for win_state in winners]
-        ).to(board_state)
-        n_winners += torch.Tensor(
-            [get_win_count(win_state) for win_state in winners]
+        reward += torch.Tensor([get_reward(win_state) for win_state in winners]).to(
+            board_state
         )
+        n_winners += torch.Tensor([get_win_count(win_state) for win_state in winners])
         # reset any dead games:
         resets = [win_state is not None for win_state in winners]
 
         # Get the output_value, ignoring any resets:
-        final_value = self.value_net(final_board_state).flatten()
+        final_value_smooth = self.value_net(final_board_state).flatten()
+        final_value = self._value_net(final_board_state).flatten()
         reset_masks = torch.Tensor(resets).to(
             device=final_value.device, dtype=torch.bool
         )
         zeros = torch.zeros_like(final_value)
         final_value = torch.where(reset_masks, zeros, final_value)
-
-        # Finally, reset any dead games:
-        self.bgs.reset_games(reset_masks)
+        final_value_smooth = torch.where(reset_masks, zeros, final_value_smooth)
 
         # Ok. Compute and return the delta:
         assert (
             ~(reward != 0) | (final_value == 0)
         ).all(), "reward != 0 -> final_value == 0"
+        assert (
+            ~(reward != 0) | (final_value_smooth == 0)
+        ).all(), "reward != 0 -> final_value == 0"
+
+        # Finally, reset any dead games:
+        self.bgs.reset_games(reset_masks)
         amortized_reward = reward + final_value * self.hparams["gamma"]
+        smooth_delta = (
+            reward
+            + final_value_smooth * self.hparams["gamma"]
+            - self.value_net(board_state).flatten()
+        )
 
         return {
             "move": move,
             "reward": reward,
             "amortized_reward": amortized_reward,
+            "smooth_delta": smooth_delta,
             "n_winners": n_winners,
         }
 
@@ -187,9 +213,7 @@ class ConnectFourAI(pl.LightningModule):
 
         with torch.no_grad():
             # compute the delta:
-            state_updates = self.take_composite_move_and_get_reward_delta(
-                board_state
-            )
+            state_updates = self.take_composite_move_and_get_reward_delta(board_state)
 
         return state_updates["reward"].mean()
 
@@ -203,11 +227,11 @@ class ConnectFourAI(pl.LightningModule):
 
         with torch.no_grad():
             # compute the delta:
-            state_updates = self.take_composite_move_and_get_reward_delta(
-                board_state
-            )
+            state_updates = self.take_composite_move_and_get_reward_delta(board_state)
             move = state_updates["move"]
             amortized_reward = state_updates["amortized_reward"]
+            smooth_delta = state_updates["smooth_delta"]
+            true_reward = state_updates["reward"]
 
             # compute the gammas:
             I = torch.pow(
@@ -218,21 +242,11 @@ class ConnectFourAI(pl.LightningModule):
         temp = 1
         # get the value loss:
 
-        delta = amortized_reward - initial_reward
-        value_loss = 0.5 * delta**2
+        # The amortized reward = gamma*future_reward
+        value_loss = 0.5 * (amortized_reward - initial_reward) ** 2
+        # We compute re-weighted gradient decent loss, as in https://arxiv.org/pdf/2306.09222.pdf
         value_loss_rew = value_loss * torch.exp(
-            torch.clamp(0.5 * (value_loss**2).detach(), max=temp)
-            / (temp + 1)
-        )
-
-        # compute the policy loss:
-        policy_loss = (
-            -I
-            * delta.detach()
-            * torch.diag(self._policy_net(board_state)[:, move])
-        )
-        policy_loss_rew = policy_loss * torch.exp(
-            torch.clamp(policy_loss.detach(), max=temp) / (temp + 1)
+            torch.clamp(value_loss.detach(), max=temp) / (temp + 1)
         )
 
         # Optimize the value net:
@@ -243,6 +257,15 @@ class ConnectFourAI(pl.LightningModule):
         if self.current_epoch > self.swa_start:
             self.value_net.update_parameters(self._value_net)
         v_sch.step()
+
+        # compute the policy loss:
+        move_logits = torch.diag(self._policy_net(board_state)[:, move])
+        policy_loss = -I * true_reward * move_logits.detach()
+        policy_loss_smooth = -I * smooth_delta.detach() * move_logits
+        # We compute re-weighted gradient decent loss, as in https://arxiv.org/pdf/2306.09222.pdf
+        policy_loss_rew = policy_loss_smooth * torch.exp(
+            torch.clamp(policy_loss_smooth.detach(), max=temp) / (temp + 1)
+        )
 
         if self.current_epoch > self.policy_start:
             # Optimize the policy net:
@@ -256,11 +279,12 @@ class ConnectFourAI(pl.LightningModule):
 
         self.logger.log_metrics(
             {
-                "train_loss": (value_loss + policy_loss).mean(),
-                "reward": state_updates["reward"].mean(),
+                "train_loss": (value_loss + policy_loss_smooth).mean(),
+                "reward": true_reward.mean(),
                 "avg_finishes": state_updates["n_winners"].mean(),
-                "value_loss_proxy": value_loss.mean(),
-                "value_loss": 0.5 * (delta**2).mean(),
+                "value_loss": value_loss.mean(),
+                "value_loss_smooth": 0.5 * (smooth_delta**2).mean(),
+                "policy_loss_smooth": policy_loss_smooth.mean(),
                 "policy_loss": policy_loss.mean(),
             }
         )
@@ -280,16 +304,17 @@ class ConnectFourAI(pl.LightningModule):
 
     def configure_optimizers(self) -> List[Optimizer]:
         """Initialize Adam optimizer."""
-        policy_optimizer = Adam(
-            self._policy_net.parameters(), lr=self.hparams.policy_lr
+        policy_optimizer = AdamW(
+            list(self._policy_net.parameters()) + list(self._embedding.parameters()),
+            lr=self.hparams.policy_lr,
+            weight_decay=self.hparams.weight_decay,
         )
         policy_scheduler = {
             "scheduler": SequentialLR(
                 policy_optimizer,
                 [
-                    CosineAnnealingLR(
-                        policy_optimizer, T_max=self.hparams.max_epochs
-                    ),
+                    # CosineAnnealingLR(policy_optimizer, T_max=self.hparams.max_epochs),
+                    ConstantLR(policy_optimizer),
                     SWALR(policy_optimizer, swa_lr=0.05),
                 ],
                 milestones=[self.swa_start + self.policy_start],
@@ -297,16 +322,17 @@ class ConnectFourAI(pl.LightningModule):
             "interval": "epoch",
         }
 
-        value_optimizer = Adam(
-            self._value_net.parameters(), lr=self.hparams.value_lr
+        value_optimizer = AdamW(
+            list(self._value_net.parameters()) + list(self._embedding.parameters()),
+            lr=self.hparams.value_lr,
+            weight_decay=self.hparams.weight_decay,
         )
         value_scheduler = {
             "scheduler": SequentialLR(
                 value_optimizer,
                 [
-                    CosineAnnealingLR(
-                        value_optimizer, T_max=self.hparams.max_epochs
-                    ),
+                    # CosineAnnealingLR(value_optimizer, T_max=self.hparams.max_epochs),
+                    ConstantLR(value_optimizer),
                     SWALR(value_optimizer, swa_lr=0.05),
                 ],
                 milestones=[self.swa_start],

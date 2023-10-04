@@ -55,9 +55,7 @@ def train_network(model: ConnectFourAI, max_epochs):
     return log_path
 
 
-def train_new_network(
-    n_rows, n_cols, run_length, hparams, max_epochs, opponent
-):
+def train_new_network(n_rows, n_cols, run_length, hparams, max_epochs, opponent):
     model = ConnectFourAI(
         opponent_policy_net=opponent,
         turn=PlayState.X,
@@ -113,9 +111,7 @@ def face_off(
 ) -> float:
     device = next(policy_net_1.parameters()).device
 
-    def play_turn(
-        bgs: MutableBatchGameState, play_state_1, play_state_2, run_length
-    ):
+    def play_turn(bgs: MutableBatchGameState, play_state_1, play_state_2, run_length):
 
         # Now choose a move:
         move = sample_move(bgs, policy_net_1, board_state=None)
@@ -140,12 +136,10 @@ def face_off(
 
         winners = bgs.winners(run_length=run_length)
         # compute the rewards:
-        reward = torch.Tensor(
-            [get_reward(win_state) for win_state in winners]
-        ).to(device=device)
-        n_winners = torch.Tensor(
-            [get_win_count(win_state) for win_state in winners]
+        reward = torch.Tensor([get_reward(win_state) for win_state in winners]).to(
+            device=device
         )
+        n_winners = torch.Tensor([get_win_count(win_state) for win_state in winners])
         # reset any dead games:
         resets = [win_state is not None for win_state in winners]
 
@@ -156,12 +150,10 @@ def face_off(
         # Now check if the game is over:
         winners = bgs.winners(run_length=run_length)
         # compute the rewards:
-        reward += torch.Tensor(
-            [get_reward(win_state) for win_state in winners]
-        ).to(device=device)
-        n_winners += torch.Tensor(
-            [get_win_count(win_state) for win_state in winners]
+        reward += torch.Tensor([get_reward(win_state) for win_state in winners]).to(
+            device=device
         )
+        n_winners += torch.Tensor([get_win_count(win_state) for win_state in winners])
         # reset any dead games:
         resets = [win_state is not None for win_state in winners]
 
@@ -283,9 +275,7 @@ def bootstrap_models(
                     run_length=run_length,
                     num_turns=faceoff_turns,
                 )
-            match_data.matches.append(
-                [str(log_path), str(opponent_path), reward]
-            )
+            match_data.matches.append([str(log_path), str(opponent_path), reward])
             total_reward += reward
 
         print(
@@ -316,28 +306,28 @@ def bootstrap_models(
                         run_length=run_length,
                         num_turns=faceoff_turns,
                     )
-                match_data.matches.append(
-                    [str(log_path), str(opponent_path), reward]
-                )
+                match_data.matches.append([str(log_path), str(opponent_path), reward])
 
         with match_file_path.open("w") as f:
             yaml.dump(dataclasses.asdict(match_data), f)
 
 
 if __name__ == "__main__":
-    hparams = {
-        "policy_net_kwargs": dict(run_lengths=[5, 3]),
-        "value_net_kwargs": dict(run_lengths=[5, 3]),
-        "policy_lr": 1e-3,
-        "value_lr": 3e-3,
-        "gamma": 0.9,
-        "batch_size": 2048,
-        "value_net_burn_in_frac": 0.1,
-    }
 
     n_rows = 6
     n_cols = 7
     run_length = 4
+    hparams = {
+        "policy_net_kwargs": dict(kernel_size=3),
+        "value_net_kwargs": dict(kernel_size=3, n_cols=n_cols, n_rows=n_rows),
+        "embedding_net_kwargs": dict(kernel_size=3, latent_dim=10, depth=2),
+        "policy_lr": 1e-3,
+        "value_lr": 1e-2,
+        "gamma": 0.95,
+        "batch_size": 2048,
+        "value_net_burn_in_frac": 0.0,
+        "weight_decay": 0.03,
+    }
 
     bootstrap_models(
         n_rows=n_rows,
@@ -345,9 +335,9 @@ if __name__ == "__main__":
         num_matches=100,
         run_length=run_length,
         hparams=hparams,
-        max_epochs=1000,
+        max_epochs=500,
         match_file_path="matches.yml",
         faceoff_turns=30,
-        train_last=True,
+        train_last=False,
         run_challenges=False,
     )

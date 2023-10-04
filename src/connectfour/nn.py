@@ -45,24 +45,38 @@ class LayerNorm2d(nn.LayerNorm):
 
 
 class ResidualLayer(nn.Module):
-    def __init__(self, in_channels, filter_size):
+    def __init__(self, in_channels, filter_size, bottleneck_dim=8):
         super().__init__()
-        self.network = nn.Sequential(
-            *[
-                nn.Conv2d(
-                    in_channels=in_channels,
-                    out_channels=in_channels,
-                    kernel_size=filter_size,
-                    padding=(filter_size - 1) // 2,
-                ),
-                LayerNorm2d(in_channels),
-                nn.GELU(),
-            ]
-            * 2
+        self.attention = nn.Sequential(
+            LayerNorm2d(in_channels),
+            ConvAttention(
+                input_dim=in_channels,
+                embed_dim=bottleneck_dim,
+                n_heads=in_channels,
+                kernel_size=filter_size,
+                padding=(filter_size - 1) // 2,
+            ),
+        )
+        self.convolution = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=filter_size,
+                padding=(filter_size - 1) // 2,
+            ),
+            LayerNorm2d(in_channels),
+            nn.GELU(),
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=in_channels,
+                kernel_size=1,
+            ),
         )
 
     def forward(self, x):
-        return x + self.network(x)
+        x = x + self.attention(x)
+        x = x + self.convolution(x)
+        return x
 
 
 class ConnectFourFeatures(nn.Module):
@@ -95,3 +109,47 @@ class ConnectFourFeatures(nn.Module):
             )
             stacks.append(w)
         return torch.concat(stacks, 1)
+
+
+class ConvAttention(nn.Module):
+    def __init__(self, input_dim, embed_dim, n_heads, kernel_size=1, padding=0):
+        super().__init__()
+        self._embed_dim = embed_dim
+        self._n_heads = n_heads
+        self.query_embed = nn.Conv2d(
+            input_dim, embed_dim * n_heads, kernel_size=kernel_size, padding=padding
+        )
+        self.key_embed = nn.Conv2d(
+            input_dim, embed_dim * n_heads, kernel_size=kernel_size, padding=padding
+        )
+        self.value_embed = nn.Conv2d(
+            input_dim, embed_dim * n_heads, kernel_size=kernel_size, padding=padding
+        )
+
+        # Initialization:
+        nn.init.normal_(self.query_embed.weight, mean=0, std=0.02)
+        nn.init.normal_(self.key_embed.weight, mean=0, std=0.02)
+        nn.init.kaiming_normal_(self.value_embed.weight)
+
+        nn.init.zeros_(self.query_embed.bias)
+        nn.init.zeros_(self.key_embed.bias)
+        nn.init.zeros_(self.value_embed.bias)
+
+    def _stack_channels(self, x):
+        x = x.permute(0, 2, 3, 1)
+        x = x.reshape(
+            [x.shape[0], x.shape[1], x.shape[2], self._embed_dim, self._n_heads]
+        )
+        return x.permute(0, 3, 4, 1, 2)
+
+    def forward(self, x):
+        scores_wide = (
+            self.query_embed(x) * self.key_embed(x) / math.sqrt(self._embed_dim)
+        )
+        values_wide = self.value_embed(x)
+        scores = self._stack_channels(scores_wide)
+        values = self._stack_channels(values_wide)
+        scores_soft = nn.functional.softmax(scores, 1)
+        out = (values * scores_soft).sum(dim=1)
+        assert out.shape == (x.shape[0], self._n_heads, x.shape[2], x.shape[3])
+        return out
