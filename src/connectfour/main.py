@@ -6,7 +6,7 @@ import pickle as pkl
 
 import yaml
 
-from connectfour.game import BatchGameState
+from connectfour.game import MutableBatchGameState
 from connectfour.nn import sample_masked_multinomial
 from connectfour.play_state import PlayState
 
@@ -25,7 +25,7 @@ def cli():
 @click.option("--x/--o", type=bool, is_flag=True)
 def two_players(rows, cols, run_length, x):
     """A simple two player game."""
-    bgs = BatchGameState(
+    bgs = MutableBatchGameState(
         batch_size=1,
         turn=PlayState.X if x else PlayState.O,
         num_rows=rows,
@@ -58,15 +58,13 @@ def one_player(x, model_file, match_file):
         model_dict = pkl.load(f)
     policy_net = load_policy_net(model_file)
 
-    bgs = BatchGameState(
+    bgs = MutableBatchGameState(
         batch_size=1,
         turn=PlayState.X if x else PlayState.O,
         num_rows=model_dict["model_hparams"]["num_rows"],
         num_cols=model_dict["model_hparams"]["num_cols"],
     )
-    while (
-        winner := bgs.winners(model_dict["model_hparams"]["run_length"])[0]
-    ) is None:
+    while (winner := bgs.winners(model_dict["model_hparams"]["run_length"])[0]) is None:
         click.echo(bgs)
         if bgs.turn == PlayState.X:
             logits = policy_net(

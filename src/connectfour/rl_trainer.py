@@ -46,11 +46,15 @@ def sample_move(
 ) -> torch.Tensor:
     # board_state = self.bgs.cannonical_board_state
     if board_state is None:
-        board_state = bgs.cannonical_board_state.to(
-            device=next(policy_net.parameters()).device
-        )
-    logits = policy_net(board_state.to(dtype=torch.float))
-    mask = ~bgs.next_actions().to(device=logits.device)
+        board_state = bgs.cannonical_board_state
+    logits = policy_net(board_state)
+
+    blank_ix = play_state_embedding_ix(PlayState.BLANK)
+    blank_space_indicator = board_state[:, blank_ix, :, :]
+    num_blank_spaces = torch.sum(blank_space_indicator, dim=1)
+    actions = num_blank_spaces != 0
+
+    mask = ~actions
     moves = sample_masked_multinomial(logits, mask, axis=1)
     return moves
 
@@ -91,6 +95,7 @@ class ConnectFourAI(pl.LightningModule):
         else:
             self.opponent_policy_net = opponent_policy_net
         self.bgs = bgs
+        self.register_buffer("board_state", self.bgs._board_state)
         play_first = False
         if play_first:
             self.play_state = PlayState.X
@@ -100,7 +105,7 @@ class ConnectFourAI(pl.LightningModule):
             self.opponent_play_state = PlayState.X
             # Let the opponent move:
             board_state = self.bgs.cannonical_board_state.to(
-                next(self.opponent_policy_net.parameters()).device
+                device=next(self.opponent_policy_net.parameters()).device
             )
             opponent_move = self.sample_move(
                 self.opponent_policy_net, board_state=board_state
@@ -129,58 +134,51 @@ class ConnectFourAI(pl.LightningModule):
 
         # Make the play:
         self.bgs.play_at(move)
-        mid_board_state = self.bgs.cannonical_board_state.to(board_state)
+        mid_board_state = self.bgs.cannonical_board_state
 
         # Now check if the game is over:
-        def get_reward(win_state):
-            if win_state == self.play_state:
-                return 1
-            if win_state == self.opponent_play_state:
-                return -1
-            return 0
+        def get_reward(winners):
+            return (winners == play_state_embedding_ix(self.play_state)).to(
+                dtype=torch.float
+            ) - (winners == play_state_embedding_ix(self.opponent_play_state)).to(
+                dtype=torch.float
+            )
 
-        def get_win_count(win_state):
-            if win_state == self.play_state:
-                return 1
-            if win_state == self.opponent_play_state:
-                return 1
-            return 0
+        def get_win_count(winners):
+            return (winners == play_state_embedding_ix(self.play_state)).to(
+                dtype=torch.float
+            ) + (winners == play_state_embedding_ix(self.opponent_play_state)).to(
+                dtype=torch.float
+            )
 
-        winners = self.bgs.winners(run_length=self.hparams["run_length"])
+        winners = self.bgs.winners_numeric(run_length=self.hparams["run_length"])
         # compute the rewards:
-        reward = torch.Tensor([get_reward(win_state) for win_state in winners]).to(
-            board_state
-        )
-        n_winners = torch.Tensor([get_win_count(win_state) for win_state in winners])
+        reward = get_reward(winners)
+        n_winners = get_win_count(winners)
         # reset any dead games:
-        resets = [win_state is not None for win_state in winners]
+        resets = winners != play_state_embedding_ix(None)
 
         # Let the opponent move:
         opponent_move = self.sample_move(
             self.opponent_policy_net, board_state=mid_board_state
         )
         self.bgs.play_at(opponent_move, resets)
-        final_board_state = self.bgs.cannonical_board_state.to(board_state)
+        final_board_state = self.bgs.cannonical_board_state
 
         # Now check if the game is over:
-        winners = self.bgs.winners(run_length=self.hparams["run_length"])
+        winners = self.bgs.winners_numeric(run_length=self.hparams["run_length"])
         # compute the rewards:
-        reward += torch.Tensor([get_reward(win_state) for win_state in winners]).to(
-            board_state
-        )
-        n_winners += torch.Tensor([get_win_count(win_state) for win_state in winners])
+        reward += get_reward(winners)
+        n_winners += get_win_count(winners)
         # reset any dead games:
-        resets = [win_state is not None for win_state in winners]
+        resets = winners != play_state_embedding_ix(None)
 
         # Get the output_value, ignoring any resets:
         final_value_smooth = self.value_net(final_board_state).flatten()
         final_value = self._value_net(final_board_state).flatten()
-        reset_masks = torch.Tensor(resets).to(
-            device=final_value.device, dtype=torch.bool
-        )
         zeros = torch.zeros_like(final_value)
-        final_value = torch.where(reset_masks, zeros, final_value)
-        final_value_smooth = torch.where(reset_masks, zeros, final_value_smooth)
+        final_value = torch.where(resets, zeros, final_value)
+        final_value_smooth = torch.where(resets, zeros, final_value_smooth)
 
         # Ok. Compute and return the delta:
         assert (
@@ -191,7 +189,7 @@ class ConnectFourAI(pl.LightningModule):
         ).all(), "reward != 0 -> final_value == 0"
 
         # Finally, reset any dead games:
-        self.bgs.reset_games(reset_masks)
+        self.bgs.reset_games(resets)
         amortized_reward = reward + final_value * self.hparams["gamma"]
         smooth_delta = (
             reward
@@ -222,7 +220,6 @@ class ConnectFourAI(pl.LightningModule):
         p_sch, v_sch = self.lr_schedulers()
 
         board_state, turn = batch
-        board_state = board_state.to(dtype=torch.float)
         initial_reward = self._value_net(board_state).flatten()
 
         with torch.no_grad():

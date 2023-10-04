@@ -1,4 +1,5 @@
 from enum import Enum
+from typing import Optional
 
 
 class PlayState(Enum):
@@ -8,13 +9,15 @@ class PlayState(Enum):
     DRAW = " "  # This is an alias for BLANK
 
 
-def play_state_embedding_ix(p: PlayState):
+def play_state_embedding_ix(p: Optional[PlayState]):
     if p == PlayState.BLANK:
         return 0
     elif p == PlayState.X:
         return 1
     elif p == PlayState.O:
         return 2
+    elif p is None:
+        return 3
     raise ValueError("Unrecognized player %s" % p)
 
 

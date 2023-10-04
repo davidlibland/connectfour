@@ -14,7 +14,7 @@ from matplotlib import pyplot as plt
 
 from connectfour.game import MutableBatchGameState
 from connectfour.io import MatchData, load_policy_net, load_cfai
-from connectfour.play_state import PlayState
+from connectfour.play_state import PlayState, play_state_embedding_ix
 from connectfour.policy import PolicyNet
 from connectfour.rl_trainer import ConnectFourAI, sample_move
 
@@ -120,42 +120,34 @@ def face_off(
         bgs.play_at(move)
 
         # Now check if the game is over:
-        def get_reward(win_state):
-            if win_state == play_state_1:
-                return 1
-            if win_state == play_state_2:
-                return -1
-            return 0
+        def get_reward(winners):
+            return (winners == play_state_embedding_ix(play_state_1)).to(
+                dtype=torch.float
+            ) - (winners == play_state_embedding_ix(play_state_2)).to(dtype=torch.float)
 
-        def get_win_count(win_state):
-            if win_state == play_state_1:
-                return 1
-            if win_state == play_state_2:
-                return 1
-            return 0
+        def get_win_count(winners):
+            return (winners == play_state_embedding_ix(play_state_1)).to(
+                dtype=torch.float
+            ) + (winners == play_state_embedding_ix(play_state_2)).to(dtype=torch.float)
 
-        winners = bgs.winners(run_length=run_length)
+        winners = bgs.winners_numeric(run_length=run_length)
         # compute the rewards:
-        reward = torch.Tensor([get_reward(win_state) for win_state in winners]).to(
-            device=device
-        )
-        n_winners = torch.Tensor([get_win_count(win_state) for win_state in winners])
+        reward = get_reward(winners)
+        n_winners = get_win_count(winners)
         # reset any dead games:
-        resets = [win_state is not None for win_state in winners]
+        resets = winners != play_state_embedding_ix(None)
 
         # Let the opponent move:
         opponent_move = sample_move(bgs=bgs, policy_net=policy_net_2)
         bgs.play_at(opponent_move, resets)
 
         # Now check if the game is over:
-        winners = bgs.winners(run_length=run_length)
+        winners = bgs.winners_numeric(run_length=run_length)
         # compute the rewards:
-        reward += torch.Tensor([get_reward(win_state) for win_state in winners]).to(
-            device=device
-        )
-        n_winners += torch.Tensor([get_win_count(win_state) for win_state in winners])
+        reward += get_reward(winners)
+        n_winners += get_win_count(winners)
         # reset any dead games:
-        resets = [win_state is not None for win_state in winners]
+        resets = winners != play_state_embedding_ix(None)
 
         # Get the output_value, ignoring any resets:
         reset_masks = torch.Tensor(resets).to(device=device, dtype=torch.bool)
@@ -335,7 +327,7 @@ if __name__ == "__main__":
         num_matches=100,
         run_length=run_length,
         hparams=hparams,
-        max_epochs=500,
+        max_epochs=50,
         match_file_path="matches.yml",
         faceoff_turns=30,
         train_last=False,

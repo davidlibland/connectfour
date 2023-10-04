@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from connectfour.embedding_net import EmbeddingNet
-from connectfour.game import BatchGameState
+from connectfour.game import MutableBatchGameState
 from connectfour.play_state import PlayState
 from connectfour.value_net import ValueNet
 
@@ -15,11 +15,11 @@ from connectfour.value_net import ValueNet
 @pytest.mark.parametrize("cols", [6, 7, 9])
 @pytest.mark.parametrize("batch_size", [3, 5, 7])
 def test_value_shape(rows, cols, batch_size):
-    bgs = BatchGameState(
+    bgs = MutableBatchGameState(
         batch_size=batch_size, turn=PlayState.X, num_cols=cols, num_rows=rows
     )
     plays = np.random.randint(low=0, high=cols, size=(7, batch_size)).tolist()
-    bgs = reduce(BatchGameState.play_at, plays, bgs)
+    bgs = reduce(MutableBatchGameState.play_at, plays, bgs)
 
     board = bgs.as_array()
 
