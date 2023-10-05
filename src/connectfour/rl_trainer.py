@@ -24,7 +24,7 @@ from connectfour.value_net import ValueNet
 from connectfour.embedding_net import EmbeddingNet
 
 
-class RLDataset(IterableDataset):
+class Placeholder(IterableDataset):
     """Iterable Dataset of game states.
 
     Args:
@@ -32,13 +32,8 @@ class RLDataset(IterableDataset):
         sample_size: number of experiences to sample at a time
     """
 
-    def __init__(self, bgs: MutableBatchGameState) -> None:
-        self.bgs = bgs
-
     def __iter__(self) -> Iterator[Tuple[torch.Tensor, int]]:
-        board_state = self.bgs.cannonical_board_state
-        for i in range(board_state.shape[0]):
-            yield board_state[i, ...], play_state_embedding_ix(self.bgs.turn)
+        yield 1
 
 
 def sample_move(
@@ -215,14 +210,14 @@ class ConnectFourAI(pl.LightningModule):
 
         return state_updates["reward"].mean()
 
-    def training_step(self, batch):
+    def training_step(self, _):
         p_opt, v_opt = self.optimizers()
         p_sch, v_sch = self.lr_schedulers()
 
-        board_state, turn = batch
+        board_state = self.bgs.cannonical_board_state
         initial_reward = self._value_net(board_state).flatten()
 
-        with torch.no_grad():
+        with (torch.no_grad()):
             # compute the delta:
             state_updates = self.take_composite_move_and_get_reward_delta(board_state)
             move = state_updates["move"]
@@ -231,10 +226,12 @@ class ConnectFourAI(pl.LightningModule):
             true_reward = state_updates["reward"]
 
             # compute the gammas:
-            I = torch.pow(
-                torch.tensor(self.hparams["gamma"]).to(board_state),
-                board_state[:, 1:, :, :].sum(dim=(1, 2, 3)),
-            )
+            I = 1
+            # Sutton uses the following for I. But I don't think it's correct:
+            # I = torch.pow(
+            #     torch.tensor(self.hparams["gamma"]).to(board_state),
+            #     board_state[:, 1:, :, :].sum(dim=(1, 2, 3)),
+            # )
 
         temp = 1
         # get the value loss:
@@ -288,10 +285,10 @@ class ConnectFourAI(pl.LightningModule):
 
     def __dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences."""
-        dataset = RLDataset(self.bgs)
+        dataset = Placeholder()
         dataloader = DataLoader(
             dataset=dataset,
-            batch_size=self.bgs.batch_size,
+            batch_size=1,
         )
         return dataloader
 
