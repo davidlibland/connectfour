@@ -9,7 +9,6 @@ from connectfour.embedding_net import EmbeddingNet
 from connectfour.game import MutableBatchGameState
 from connectfour.play_state import PlayState
 from connectfour.value_net import ValueNet
-from connectfour.embedding_net import EmbeddingNet
 
 
 @pytest.mark.parametrize("rows", [3, 4, 7])
@@ -26,7 +25,9 @@ def test_embedding_shape(rows, cols, batch_size, out_channels, depth):
 
     board = bgs.as_array()
 
-    embedding = EmbeddingNet(depth=depth, out_channels=out_channels, kernel_size=3)
+    embedding = EmbeddingNet(
+        depth=depth, out_channels=out_channels, kernel_size=3
+    )
 
     outs = embedding(board.to(dtype=torch.float))
 
@@ -45,7 +46,9 @@ def test_embedding_initialization(rows, cols, batch_size, out_channels, depth):
     )
 
     board = bgs.as_array()
-    embedding = EmbeddingNet(depth=depth, out_channels=out_channels, kernel_size=3)
+    embedding = EmbeddingNet(
+        depth=depth, out_channels=out_channels, kernel_size=3
+    )
 
     i_outs = embedding.fan_out(board.to(dtype=torch.float))
     outs = embedding(board.to(dtype=torch.float))

@@ -1,27 +1,28 @@
 """
 The main RL training code.
 """
-from typing import List, Tuple, Iterator, Dict
-
-import torch
-import torch.nn as nn
-from torch.optim import Optimizer, AdamW
-from torch.utils.data import IterableDataset, DataLoader
-
-from torch.optim.swa_utils import AveragedModel
-from torch.optim.lr_scheduler import CosineAnnealingLR, SequentialLR, ConstantLR
-from torch.optim.swa_utils import SWALR
-
-
-from connectfour.nn import sample_masked_multinomial
+import collections
+from typing import Dict, Iterator, List, Tuple
 
 import lightning.pytorch as pl
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim import AdamW, Optimizer
+from torch.optim.lr_scheduler import (
+    ConstantLR,
+    CosineAnnealingLR,
+    SequentialLR,
+)
+from torch.optim.swa_utils import SWALR, AveragedModel
+from torch.utils.data import DataLoader, IterableDataset
 
+from connectfour.embedding_net import EmbeddingNet
 from connectfour.game import MutableBatchGameState
+from connectfour.nn import sample_masked_multinomial
 from connectfour.play_state import PlayState, play_state_embedding_ix
 from connectfour.policy import PolicyNet
 from connectfour.value_net import ValueNet
-from connectfour.embedding_net import EmbeddingNet
 
 
 class Placeholder(IterableDataset):
@@ -67,6 +68,7 @@ class ConnectFourAI(pl.LightningModule):
         max_epochs,
         value_net_burn_in_frac,
         weight_decay,
+        val_batch_size,
         opponent_policy_net: nn.Module,
         **kwargs
     ):
@@ -90,7 +92,9 @@ class ConnectFourAI(pl.LightningModule):
         else:
             self.opponent_policy_net = opponent_policy_net
         self.bgs = bgs
+        self.val_bgs = MutableBatchGameState(**{**kwargs, "batch_size": val_batch_size})
         self.register_buffer("board_state", self.bgs._board_state)
+        self.register_buffer("val_board_state", self.val_bgs._board_state)
         play_first = False
         if play_first:
             self.play_state = PlayState.X
@@ -111,12 +115,14 @@ class ConnectFourAI(pl.LightningModule):
         self.policy_start = int(
             self.hparams.max_epochs * self.hparams.value_net_burn_in_frac
         )
+        self.history = collections.deque()
+        self.n_steps = 10
 
     def sample_move(self, policy_net, board_state) -> torch.Tensor:
         return sample_move(self.bgs, policy_net, board_state)
 
     def take_composite_move_and_get_reward_delta(
-        self, board_state
+        self, board_state, use_random_oponent=False
     ) -> Dict[str, torch.Tensor]:
         """
         Both the player and the opponent take a move. The state is updated and
@@ -283,6 +289,129 @@ class ConnectFourAI(pl.LightningModule):
             }
         )
 
+    def validation_step(self, *args):
+        metrics = {
+            "val_train_loss": [],
+            "val_reward": [],
+            "val_avg_finishes": [],
+            "val_value_loss": [],
+            "val_value_loss_smooth": [],
+            "val_policy_loss_smooth": [],
+            "val_policy_loss": [],
+        }
+        with (torch.no_grad()):
+            for _ in range(10):
+                board_state = self.val_bgs.cannonical_board_state
+                initial_reward = self._value_net(board_state).flatten()
+
+                # compute the delta:
+                # Choose a move:
+                move = self.sample_move(self._policy_net, board_state=board_state)
+
+                # Make the play:
+                self.val_bgs.play_at(move)
+                mid_board_state = self.val_bgs.cannonical_board_state
+
+                # Now check if the game is over:
+                def get_reward(winners):
+                    return (winners == play_state_embedding_ix(self.play_state)).to(
+                        dtype=torch.float
+                    ) - (
+                        winners == play_state_embedding_ix(self.opponent_play_state)
+                    ).to(
+                        dtype=torch.float
+                    )
+
+                def get_win_count(winners):
+                    return (winners == play_state_embedding_ix(self.play_state)).to(
+                        dtype=torch.float
+                    ) + (
+                        winners == play_state_embedding_ix(self.opponent_play_state)
+                    ).to(
+                        dtype=torch.float
+                    )
+
+                winners = self.val_bgs.winners_numeric(
+                    run_length=self.hparams["run_length"]
+                )
+                # compute the rewards:
+                reward = get_reward(winners)
+                n_winners = get_win_count(winners)
+                # reset any dead games:
+                resets = winners != play_state_embedding_ix(None)
+
+                # Let a random opponent move:
+                blank_ix = play_state_embedding_ix(PlayState.BLANK)
+                blank_space_indicator = mid_board_state[:, blank_ix, :, :]
+                num_blank_spaces = torch.sum(blank_space_indicator, dim=1)
+                actions = num_blank_spaces != 0
+
+                mask = ~actions
+                opponent_move = sample_masked_multinomial(
+                    torch.zeros_like(mask, dtype=torch.float), mask, axis=1
+                )
+                self.val_bgs.play_at(opponent_move, resets)
+                final_board_state = self.val_bgs.cannonical_board_state
+
+                # Now check if the game is over:
+                winners = self.val_bgs.winners_numeric(
+                    run_length=self.hparams["run_length"]
+                )
+                # compute the rewards:
+                reward += get_reward(winners)
+                n_winners += get_win_count(winners)
+                # reset any dead games:
+                resets = winners != play_state_embedding_ix(None)
+
+                # Get the output_value, ignoring any resets:
+                final_value_smooth = self.value_net(final_board_state).flatten()
+                final_value = self._value_net(final_board_state).flatten()
+                zeros = torch.zeros_like(final_value)
+                final_value = torch.where(resets, zeros, final_value)
+                final_value_smooth = torch.where(resets, zeros, final_value_smooth)
+
+                # Ok. Compute and return the delta:
+                assert (
+                    ~(reward != 0) | (final_value == 0)
+                ).all(), "reward != 0 -> final_value == 0"
+                assert (
+                    ~(reward != 0) | (final_value_smooth == 0)
+                ).all(), "reward != 0 -> final_value == 0"
+
+                # Finally, reset any dead games:
+                self.val_bgs.reset_games(resets)
+                amortized_reward = reward + final_value * self.hparams["gamma"]
+                smooth_delta = (
+                    reward
+                    + final_value_smooth * self.hparams["gamma"]
+                    - self.value_net(board_state).flatten()
+                )
+                # get the value loss:
+
+                # The amortized reward = gamma*future_reward
+                value_loss = 0.5 * (amortized_reward - initial_reward) ** 2
+
+                # compute the policy loss:
+                move_logits = torch.diag(self._policy_net(board_state)[:, move])
+                policy_loss = -reward * move_logits.detach()
+                policy_loss_smooth = -smooth_delta.detach() * move_logits
+
+                metrics["val_train_loss"].append(
+                    (value_loss + policy_loss_smooth).mean()
+                )
+                metrics["val_reward"].append(reward.mean())
+                metrics["val_avg_finishes"].append(n_winners.mean())
+                metrics["val_value_loss"].append(value_loss.mean())
+                metrics["val_value_loss_smooth"].append(
+                    0.5 * (smooth_delta**2).mean()
+                )
+                metrics["val_policy_loss_smooth"].append(policy_loss_smooth.mean())
+                metrics["val_policy_loss"].append(policy_loss.mean())
+
+        self.logger.log_metrics(
+            {k: np.mean([v.cpu().numpy() for v in vals]) for k, vals in metrics.items()}
+        )
+
     def __dataloader(self) -> DataLoader:
         """Initialize the Replay Buffer dataset used for retrieving experiences."""
         dataset = Placeholder()
@@ -293,6 +422,10 @@ class ConnectFourAI(pl.LightningModule):
         return dataloader
 
     def train_dataloader(self) -> DataLoader:
+        """Get train loader."""
+        return self.__dataloader()
+
+    def val_dataloader(self) -> DataLoader:
         """Get train loader."""
         return self.__dataloader()
 

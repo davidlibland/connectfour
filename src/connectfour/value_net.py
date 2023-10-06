@@ -3,14 +3,21 @@ import math
 
 import torch
 import torch.nn as nn
-from connectfour.nn import ResidualLayer, ConnectFourFeatures, ConvAttention
+
+from connectfour.nn import ConnectFourFeatures, ConvAttention, ResidualLayer
 
 
 class ValueNet(nn.Module):
     """This is a simple resnet"""
 
     def __init__(
-        self, embedding: nn.Module, kernel_size, n_rows, n_cols, *args, **kwargs
+        self,
+        embedding: nn.Module,
+        kernel_size,
+        n_rows,
+        n_cols,
+        *args,
+        **kwargs
     ):
         super().__init__(*args, **kwargs)
         assert kernel_size % 2 == 1

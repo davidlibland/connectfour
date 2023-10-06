@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import Iterator, Optional, Generic, TypeVar, Type, List, Union
+from typing import Generic, Iterator, List, Optional, Type, TypeVar, Union
 
 P = TypeVar("P")
 A = TypeVar("A")

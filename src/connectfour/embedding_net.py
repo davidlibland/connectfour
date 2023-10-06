@@ -4,8 +4,8 @@ import math
 import torch
 import torch.nn as nn
 
-from connectfour.nn import ResidualLayer, ConnectFourFeatures, LayerNorm2d
-from connectfour.play_state import play_state_embedding_ix, PlayState
+from connectfour.nn import ConnectFourFeatures, LayerNorm2d, ResidualLayer
+from connectfour.play_state import PlayState, play_state_embedding_ix
 
 
 class EmbeddingNet(nn.Module):

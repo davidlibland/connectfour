@@ -1,16 +1,14 @@
 """The main entry point"""
 import pathlib
-
-import click
 import pickle as pkl
 
+import click
 import yaml
 
 from connectfour.game import MutableBatchGameState
+from connectfour.io import MatchData, load_policy_net
 from connectfour.nn import sample_masked_multinomial
 from connectfour.play_state import PlayState
-
-from connectfour.io import MatchData, load_policy_net
 
 
 @click.group()
@@ -65,14 +63,18 @@ def one_player(x, model_file, match_file, temperature):
         num_rows=model_dict["model_hparams"]["num_rows"],
         num_cols=model_dict["model_hparams"]["num_cols"],
     )
-    while (winner := bgs.winners(model_dict["model_hparams"]["run_length"])[0]) is None:
+    while (
+        winner := bgs.winners(model_dict["model_hparams"]["run_length"])[0]
+    ) is None:
         click.echo(bgs)
         if bgs.turn == PlayState.X:
             logits = policy_net(
                 bgs.cannonical_board_state.to(next(policy_net.parameters()))
             )
             mask = ~bgs.next_actions().to(device=logits.device)
-            moves = sample_masked_multinomial(logits / temperature, mask, axis=1)
+            moves = sample_masked_multinomial(
+                logits / temperature, mask, axis=1
+            )
             loc = moves[0]
         else:
             loc = click.prompt(
@@ -108,7 +110,9 @@ def ais(x, model_file, match_file, temperature):
         num_rows=model_dict["model_hparams"]["num_rows"],
         num_cols=model_dict["model_hparams"]["num_cols"],
     )
-    while (winner := bgs.winners(model_dict["model_hparams"]["run_length"])[0]) is None:
+    while (
+        winner := bgs.winners(model_dict["model_hparams"]["run_length"])[0]
+    ) is None:
         click.echo(bgs)
         if bgs.turn == PlayState.X:
             logits = policy_net1(

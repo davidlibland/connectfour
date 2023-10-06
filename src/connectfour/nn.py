@@ -1,7 +1,8 @@
-import torch
-from torch import nn
-import torch.nn.functional as F
 import math
+
+import torch
+import torch.nn.functional as F
+from torch import nn
 
 from connectfour.utils import get_winning_filters
 
@@ -112,18 +113,29 @@ class ConnectFourFeatures(nn.Module):
 
 
 class ConvAttention(nn.Module):
-    def __init__(self, input_dim, embed_dim, n_heads, kernel_size=1, padding=0):
+    def __init__(
+        self, input_dim, embed_dim, n_heads, kernel_size=1, padding=0
+    ):
         super().__init__()
         self._embed_dim = embed_dim
         self._n_heads = n_heads
         self.query_embed = nn.Conv2d(
-            input_dim, embed_dim * n_heads, kernel_size=kernel_size, padding=padding
+            input_dim,
+            embed_dim * n_heads,
+            kernel_size=kernel_size,
+            padding=padding,
         )
         self.key_embed = nn.Conv2d(
-            input_dim, embed_dim * n_heads, kernel_size=kernel_size, padding=padding
+            input_dim,
+            embed_dim * n_heads,
+            kernel_size=kernel_size,
+            padding=padding,
         )
         self.value_embed = nn.Conv2d(
-            input_dim, embed_dim * n_heads, kernel_size=kernel_size, padding=padding
+            input_dim,
+            embed_dim * n_heads,
+            kernel_size=kernel_size,
+            padding=padding,
         )
 
         # Initialization:
@@ -138,13 +150,21 @@ class ConvAttention(nn.Module):
     def _stack_channels(self, x):
         x = x.permute(0, 2, 3, 1)
         x = x.reshape(
-            [x.shape[0], x.shape[1], x.shape[2], self._embed_dim, self._n_heads]
+            [
+                x.shape[0],
+                x.shape[1],
+                x.shape[2],
+                self._embed_dim,
+                self._n_heads,
+            ]
         )
         return x.permute(0, 3, 4, 1, 2)
 
     def forward(self, x):
         scores_wide = (
-            self.query_embed(x) * self.key_embed(x) / math.sqrt(self._embed_dim)
+            self.query_embed(x)
+            * self.key_embed(x)
+            / math.sqrt(self._embed_dim)
         )
         values_wide = self.value_embed(x)
         scores = self._stack_channels(scores_wide)

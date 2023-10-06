@@ -5,10 +5,10 @@ import numpy as np
 import pytest
 import torch
 
+from connectfour.embedding_net import EmbeddingNet
 from connectfour.game import MutableBatchGameState
 from connectfour.play_state import PlayState
 from connectfour.policy import PolicyNet
-from connectfour.embedding_net import EmbeddingNet
 
 
 @pytest.mark.parametrize("rows", [3, 4, 7])

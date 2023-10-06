@@ -1,9 +1,9 @@
 from collections import Counter
 from functools import reduce
+
 import torch
 
 import connectfour.nn as cf_nn
-
 from connectfour.game import BatchGameState
 from connectfour.play_state import PlayState
 

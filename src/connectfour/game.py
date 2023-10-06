@@ -1,6 +1,6 @@
-from functools import reduce
-from typing import Optional, List
 import random
+from functools import reduce
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -9,8 +9,8 @@ import torch.nn as nn
 from connectfour.abstract import AbsBatchGameState, ABSGame
 from connectfour.play_state import (
     PlayState,
-    play_state_embedding_ix,
     play_state_embedding,
+    play_state_embedding_ix,
     play_state_extraction,
 )
 from connectfour.utils import get_winning_filters
@@ -51,15 +51,17 @@ class MutableBatchGameState(AbsBatchGameState):
 
     def _blank_board(self):
         return torch.tile(
-            torch.tensor(play_state_embedding(PlayState.BLANK), dtype=torch.float)[
-                :, None, None
-            ],
+            torch.tensor(
+                play_state_embedding(PlayState.BLANK), dtype=torch.float
+            )[:, None, None],
             (1, self._num_rows, self._num_cols),
         )
 
     def _blank_boards(self):
         blank_board = self._blank_board()
-        return torch.tile(blank_board[None, :, :, :], (self.batch_size, 1, 1, 1))
+        return torch.tile(
+            blank_board[None, :, :, :], (self.batch_size, 1, 1, 1)
+        )
 
     def winners_numeric(self, run_length=4) -> torch.Tensor:
         results = torch.ones(
@@ -80,7 +82,9 @@ class MutableBatchGameState(AbsBatchGameState):
             )
             win_types.append(torch.amax(w, dim=(2, 3)))
         wins = reduce(torch.maximum, win_types) >= run_length
-        for p in [play_state_embedding_ix(x) for x in [PlayState.X, PlayState.O]]:
+        for p in [
+            play_state_embedding_ix(x) for x in [PlayState.X, PlayState.O]
+        ]:
             results[wins[:, p]] = p
         return results
 
@@ -93,7 +97,8 @@ class MutableBatchGameState(AbsBatchGameState):
                     return p
 
         results = [
-            get_play_state(v) for v in results_numeric.detach().cpu().numpy().tolist()
+            get_play_state(v)
+            for v in results_numeric.detach().cpu().numpy().tolist()
         ]
         return results
 
@@ -125,7 +130,9 @@ class MutableBatchGameState(AbsBatchGameState):
         # Determine the number of previous plays in each column by summing the one hot mask:
         num_plays = torch.einsum(
             "ijki->i",
-            self._board_state[:, play_state_embedding_ix(PlayState.BLANK) + 1 :, :, js],
+            self._board_state[
+                :, play_state_embedding_ix(PlayState.BLANK) + 1 :, :, js
+            ],
         ).to(torch.int)
         is_ = self._num_rows - 1 - num_plays
         # Set the one-hot-values at those locations
@@ -146,7 +153,9 @@ class MutableBatchGameState(AbsBatchGameState):
         # reset any other games.
         if int(reset_games.sum()):
             board_state[reset_games, :, :, :] = 0
-            board_state[reset_games, play_state_embedding_ix(PlayState.BLANK), :, :] = 1
+            board_state[
+                reset_games, play_state_embedding_ix(PlayState.BLANK), :, :
+            ] = 1
 
     def reset_games(self, reset_games) -> "MutableBatchGameState":
         """Reset the games"""
@@ -166,7 +175,9 @@ class MutableBatchGameState(AbsBatchGameState):
                         for row in game
                     ]
                 )
-                for game in torch.permute(self._board_state, (0, 2, 3, 1)).tolist()
+                for game in torch.permute(
+                    self._board_state, (0, 2, 3, 1)
+                ).tolist()
             ]
         )
 
@@ -174,7 +185,9 @@ class MutableBatchGameState(AbsBatchGameState):
         game_strs = []
         for game in self.as_tuple():
             hor_line = "\n%s\n" % ("-" * (self._num_cols * 2 - 1))
-            game_strs.append(hor_line.join(map(lambda row: "|".join(row), game)))
+            game_strs.append(
+                hor_line.join(map(lambda row: "|".join(row), game))
+            )
         hor_line = "\n\n%s\n\n" % ("*" * (self._num_cols * 2 + 1))
         return hor_line.join(game_strs)
 
@@ -225,15 +238,17 @@ class BatchGameState(AbsBatchGameState):
 
     def _blank_board(self):
         return torch.tile(
-            torch.tensor(play_state_embedding(PlayState.BLANK), dtype=torch.int32)[
-                :, None, None
-            ],
+            torch.tensor(
+                play_state_embedding(PlayState.BLANK), dtype=torch.int32
+            )[:, None, None],
             (1, self._num_rows, self._num_cols),
         )
 
     def _blank_boards(self):
         blank_board = self._blank_board()
-        return torch.tile(blank_board[None, :, :, :], (self.batch_size, 1, 1, 1))
+        return torch.tile(
+            blank_board[None, :, :, :], (self.batch_size, 1, 1, 1)
+        )
 
     def winners(self, run_length=4) -> List[Optional[PlayState]]:
         results = np.array([None] * self.batch_size)
@@ -285,7 +300,9 @@ class BatchGameState(AbsBatchGameState):
         # Determine the number of previous plays in each column by summing the one hot mask:
         num_plays = torch.einsum(
             "ijki->i",
-            self._board_state[:, play_state_embedding_ix(PlayState.BLANK) + 1 :, :, js],
+            self._board_state[
+                :, play_state_embedding_ix(PlayState.BLANK) + 1 :, :, js
+            ],
         )
         is_ = self._num_rows - 1 - num_plays
         # Set the one-hot-values at those locations
@@ -328,7 +345,9 @@ class BatchGameState(AbsBatchGameState):
                         for row in game
                     ]
                 )
-                for game in torch.permute(self._board_state, (0, 2, 3, 1)).tolist()
+                for game in torch.permute(
+                    self._board_state, (0, 2, 3, 1)
+                ).tolist()
             ]
         )
 
@@ -336,7 +355,9 @@ class BatchGameState(AbsBatchGameState):
         game_strs = []
         for game in self.as_tuple():
             hor_line = "\n%s\n" % ("-" * (self._num_cols * 2 - 1))
-            game_strs.append(hor_line.join(map(lambda row: "|".join(row), game)))
+            game_strs.append(
+                hor_line.join(map(lambda row: "|".join(row), game))
+            )
         hor_line = "\n\n%s\n\n" % ("*" * (self._num_cols * 2 + 1))
         return hor_line.join(game_strs)
 

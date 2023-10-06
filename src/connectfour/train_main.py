@@ -1,9 +1,10 @@
 import dataclasses
 import itertools
 import math
-from pathlib import Path
 import pickle as pkl
 import random
+import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -13,17 +14,18 @@ from lightning import Trainer
 from matplotlib import pyplot as plt
 
 from connectfour.game import MutableBatchGameState
-from connectfour.io import MatchData, load_policy_net, load_cfai
+from connectfour.io import MatchData, load_cfai, load_policy_net
 from connectfour.play_state import PlayState, play_state_embedding_ix
 from connectfour.policy import PolicyNet
 from connectfour.rl_trainer import ConnectFourAI, sample_move
 
 
-def train_network(model: ConnectFourAI, max_epochs):
+def train_network(model: ConnectFourAI, max_epochs, check_val_every_n_epoch):
     print(model.hparams)
 
     trainer = Trainer(
         accelerator="auto",
+        check_val_every_n_epoch=check_val_every_n_epoch,
         # devices=1 if torch.cuda.is_available() else None,  # limiting got iPython runs
         max_epochs=max_epochs,
         # val_check_interval=50,
@@ -43,19 +45,14 @@ def train_network(model: ConnectFourAI, max_epochs):
             f,
         )
     logs = log_path / "metrics.csv"
-    log_df = pd.read_csv(logs).set_index("step")
-    w = int(math.sqrt(len(log_df.columns)))
-    h = math.ceil(len(log_df.columns) / w)
-    fig, axs = plt.subplots(w, h, figsize=(4 * h, 6 * w))
-    for col, ax in zip(log_df.columns, axs.flatten()):
-        log_df[col].ewm(halflife=max_epochs / 10).mean().plot(y=col, ax=ax)
-        ax.set_title(col)
-    fig.savefig(log_path / "metrics.png")
+    plot_metrics(log_path, logs, max_epochs)
 
     return log_path
 
 
-def train_new_network(n_rows, n_cols, run_length, hparams, max_epochs, opponent):
+def train_new_network(
+    n_rows, n_cols, run_length, hparams, max_epochs, opponent, check_val_every_n_epoch
+):
     model = ConnectFourAI(
         opponent_policy_net=opponent,
         turn=PlayState.X,
@@ -66,40 +63,32 @@ def train_new_network(n_rows, n_cols, run_length, hparams, max_epochs, opponent)
         max_epochs=max_epochs,
         **hparams,
     )
-
-    print(model.hparams)
-
-    trainer = Trainer(
-        accelerator="auto",
-        # devices=1 if torch.cuda.is_available() else None,  # limiting got iPython runs
+    return train_network(
+        model=model,
         max_epochs=max_epochs,
-        # val_check_interval=50,
-        logger=True,
+        check_val_every_n_epoch=check_val_every_n_epoch,
     )
 
-    trainer.fit(model)
 
-    log_path = Path(trainer.logger.log_dir)
-
-    with (log_path / "model.pkl").open("wb") as f:
-        pkl.dump(
-            {
-                "model_state": model.state_dict(),
-                "model_hparams": model.hparams,
-            },
-            f,
-        )
-    logs = log_path / "metrics.csv"
+def plot_metrics(log_path, logs, max_epochs):
     log_df = pd.read_csv(logs).set_index("step")
+    val_met = re.compile(r"^val_(?P<rest>.*)")
+    val_df = log_df[[v for v in log_df.columns if val_met.match(v)]]
+    val_df = val_df.rename(
+        columns={v: val_met.match(v)["rest"] for v in val_df.columns}
+    )
+    log_df = log_df[[v for v in log_df.columns if not val_met.match(v)]]
     w = int(math.sqrt(len(log_df.columns)))
     h = math.ceil(len(log_df.columns) / w)
     fig, axs = plt.subplots(w, h, figsize=(4 * h, 6 * w))
     for col, ax in zip(log_df.columns, axs.flatten()):
         log_df[col].ewm(halflife=max_epochs / 10).mean().plot(y=col, ax=ax)
+        if col in val_df.columns:
+            val_df[col].ewm(halflife=max_epochs / 10).mean().plot(
+                y=col, ax=ax, color="red", ls=":"
+            )
         ax.set_title(col)
     fig.savefig(log_path / "metrics.png")
-
-    return log_path
 
 
 def face_off(
@@ -188,6 +177,7 @@ def bootstrap_models(
     n_test_opponents=5,
     train_last=False,
     run_challenges=True,
+    check_val_every_n_epoch=10,
 ):
     if faceoff_turns is None:
         faceoff_turns = max(max_epochs // 3, 10)
@@ -203,6 +193,7 @@ def bootstrap_models(
             hparams=hparams,
             max_epochs=max_epochs,
             opponent=None,
+            check_val_every_n_epoch=check_val_every_n_epoch,
         )
         match_data = MatchData(models=[str(log_path)], matches=[])
     for _ in range(num_matches):
@@ -224,6 +215,7 @@ def bootstrap_models(
                 hparams=hparams,
                 max_epochs=max_epochs,
                 opponent=opponent_policy_net,
+                check_val_every_n_epoch=check_val_every_n_epoch,
             )
             policy_net = load_policy_net(log_path)
         else:
@@ -241,7 +233,11 @@ def bootstrap_models(
 
             my_ai.opponent_policy_net = opponent_policy_net
 
-            log_path = train_network(my_ai, max_epochs=max_epochs)
+            log_path = train_network(
+                my_ai,
+                max_epochs=max_epochs,
+                check_val_every_n_epoch=check_val_every_n_epoch,
+            )
             policy_net = load_policy_net(log_path)
 
         # Add the model to the match data:
@@ -317,6 +313,7 @@ if __name__ == "__main__":
         "value_lr": 1e-2,
         "gamma": 0.95,
         "batch_size": 2048,
+        "val_batch_size": 256,
         "value_net_burn_in_frac": 0.0,
         "weight_decay": 0.03,
     }
@@ -328,6 +325,7 @@ if __name__ == "__main__":
         run_length=run_length,
         hparams=hparams,
         max_epochs=50,
+        check_val_every_n_epoch=10,
         match_file_path="matches.yml",
         faceoff_turns=30,
         train_last=False,

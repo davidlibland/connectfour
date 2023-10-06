@@ -24,7 +24,9 @@ def test_value_shape(rows, cols, batch_size):
     board = bgs.as_array()
 
     embedding = EmbeddingNet(depth=2, out_channels=4, kernel_size=3)
-    policy_net = ValueNet(embedding=embedding, n_rows=rows, n_cols=cols, kernel_size=3)
+    policy_net = ValueNet(
+        embedding=embedding, n_rows=rows, n_cols=cols, kernel_size=3
+    )
 
     logits = policy_net(board.to(dtype=torch.float))
 

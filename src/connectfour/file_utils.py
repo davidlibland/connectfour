@@ -1,7 +1,7 @@
 import json
+import os
 import pathlib
 from datetime import datetime
-import os
 
 
 def build_checkpoint_dir_name(name="Checkpoint"):
