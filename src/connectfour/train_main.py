@@ -31,8 +31,18 @@ def train_network(model: ConnectFourAI, max_epochs, check_val_every_n_epoch):
         # val_check_interval=50,
         logger=True,
     )
+    cache_path = Path("cache.pkl")
+    if cache_path.exists() and hasattr(model, "minimax_corrector"):
+        with cache_path.open("rb") as f:
+            cache = pkl.load(f)
+        for k, v in cache.items():
+            model.minimax_corrector.cache[k] = v
 
     trainer.fit(model)
+
+    if hasattr(model, "minimax_corrector"):
+        with cache_path.open("wb") as f:
+            pkl.dump(model.minimax_corrector.cache, f)
 
     log_path = Path(trainer.logger.log_dir)
 
@@ -78,6 +88,8 @@ def plot_metrics(log_path, logs, max_epochs):
         columns={v: val_met.match(v)["rest"] for v in val_df.columns}
     )
     log_df = log_df[[v for v in log_df.columns if not val_met.match(v)]]
+    if max_epochs is None:
+        max_epochs = len(log_df.dropna())
     w = int(math.sqrt(len(log_df.columns)))
     h = math.ceil(len(log_df.columns) / w)
     fig, axs = plt.subplots(w, h, figsize=(4 * h, 6 * w))
@@ -309,13 +321,16 @@ if __name__ == "__main__":
         "policy_net_kwargs": dict(kernel_size=3),
         "value_net_kwargs": dict(kernel_size=3, n_cols=n_cols, n_rows=n_rows),
         "embedding_net_kwargs": dict(kernel_size=3, latent_dim=10, depth=2),
-        "policy_lr": 1e-3,
-        "value_lr": 1e-2,
-        "gamma": 0.95,
-        "batch_size": 2048,
-        "val_batch_size": 256,
+        "policy_lr": 3e-2,
+        "value_lr": 3e-2,
+        "gamma": 0.9,
+        "batch_size": 128,
+        "val_batch_size": 64,
         "value_net_burn_in_frac": 0.0,
+        "n_play_ahead_steps": 10,
         "weight_decay": 0.03,
+        "bootstrap_threshold": 0.3,
+        "minimax_depth": 2,
     }
 
     bootstrap_models(
@@ -324,10 +339,10 @@ if __name__ == "__main__":
         num_matches=100,
         run_length=run_length,
         hparams=hparams,
-        max_epochs=50,
-        check_val_every_n_epoch=10,
+        max_epochs=3000,
+        check_val_every_n_epoch=50,
         match_file_path="matches.yml",
         faceoff_turns=30,
-        train_last=False,
+        train_last=True,
         run_challenges=False,
     )
