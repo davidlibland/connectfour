@@ -330,7 +330,7 @@ if __name__ == "__main__":
         "n_play_ahead_steps": 10,
         "weight_decay": 0.03,
         "bootstrap_threshold": 0.3,
-        "minimax_depth": 2,
+        "minimax_depth": 4,
     }
 
     bootstrap_models(

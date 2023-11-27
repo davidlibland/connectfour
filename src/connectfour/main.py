@@ -161,11 +161,14 @@ def ais(x, model_file, match_file, temperature):
 @click.option("--match-file", "-m", type=click.Path(), default="matches.yml")
 def plot_active_metrics(match_file):
     """Plots metrics"""
-    with open(match_file, "r") as f:
-        match_data = MatchData(**yaml.safe_load(f))
-    # model_file = match_data.top_performers()[0]
-    log_path = pathlib.Path(match_data.models[-1])
-    log_paths = (log_path.parent).glob("version_*")
+    try:
+        with open(match_file, "r") as f:
+            match_data = MatchData(**yaml.safe_load(f))
+        # model_file = match_data.top_performers()[0]
+        log_path = pathlib.Path(match_data.models[-1])
+        log_paths = (log_path.parent).glob("version_*")
+    except FileNotFoundError:
+        log_paths = pathlib.Path("lightning_logs").glob("version_*")
     m_n = re.compile(r".*version_(?P<n>\d+)")
     log_path = sorted(log_paths, key=lambda x: int(m_n.match(str(x))["n"]))[-1]
     logs = log_path / "metrics.csv"

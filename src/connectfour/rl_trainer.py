@@ -77,6 +77,7 @@ class ConnectFourAI(pl.LightningModule):
         opponent_policy_net: nn.Module,
         minimax_depth: int = 4,
         minimax_target=True,
+        ce_loss_strength=1,
         **kwargs
     ):
         super().__init__()
@@ -295,7 +296,7 @@ class ConnectFourAI(pl.LightningModule):
                 full_logits, target.detach(), reduction="none"
             )
             print("using ce loss")
-            total_policy_loss = ce_loss
+            total_policy_loss += self.hparams.ce_loss_strength * ce_loss
 
         if self.current_epoch > self.policy_start:
             # Optimize the policy net:
