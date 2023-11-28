@@ -47,8 +47,10 @@ def two_players(rows, cols, run_length, x):
 # @click.option("--cols", "-c", type=int, default=7)
 # @click.option("--run-length", "-l", type=int, default=4)
 @click.option("--x/--o", type=bool, is_flag=True)
-@click.option("--model-file", "-f", type=click.Path(), default=None)
-@click.option("--match-file", "-m", type=click.Path(), default="matches.yml")
+@click.option(
+    "--model-file", "-f", type=click.Path(), default="lightning_logs/version_0"
+)
+@click.option("--match-file", "-m", type=click.Path(), default=None)
 @click.option("--temperature", "-t", type=float, default=".01")
 @click.option("--minimax_depth", "-d", type=int, default=0)
 def one_player(x, model_file, match_file, temperature, minimax_depth):
@@ -57,6 +59,11 @@ def one_player(x, model_file, match_file, temperature, minimax_depth):
         with open(match_file, "r") as f:
             match_data = MatchData(**yaml.safe_load(f))
         model_file = match_data.models[-1]
+    if model_file is None:
+        log_paths = pathlib.Path("lightning_logs").glob("version_*")
+        m_n = re.compile(r".*version_(?P<n>\d+)")
+        model_file = sorted(log_paths, key=lambda x: int(m_n.match(str(x))["n"]))[-1]
+    click.echo(f"Loading model at {model_file}.")
     with open(f"{model_file}/model.pkl", "rb") as f:
         model_dict = pkl.load(f)
     policy_net = load_policy_net(model_file)

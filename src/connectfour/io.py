@@ -31,25 +31,14 @@ class MatchData:
             noise = np.random.randn(len(reward_per_model)) * eps * reward_std
             reward_per_model = {
                 model: reward + xi
-                for (model, reward), xi in zip(
-                    reward_per_model.items(), noise.tolist()
-                )
+                for (model, reward), xi in zip(reward_per_model.items(), noise.tolist())
             }
-        top_models = sorted(
-            self.models, key=reward_per_model.get, reverse=True
-        )
+        top_models = sorted(self.models, key=reward_per_model.get, reverse=True)
         return top_models
 
 
 def load_cfai(log_path):
-    model_file = pathlib.Path(log_path) / "model.pkl"
-    with open(model_file, "rb") as f:
-        model_dict = pkl.load(f)
-    full_model = ConnectFourAI(
-        **model_dict["model_hparams"], opponent_policy_net=None
-    )
-    full_model.load_state_dict(model_dict["model_state"])
-    return full_model
+    return ConnectFourAI.load(log_path)
 
 
 def load_policy_net(log_path):

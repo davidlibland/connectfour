@@ -46,14 +46,7 @@ def train_network(model: ConnectFourAI, max_epochs, check_val_every_n_epoch):
 
     log_path = Path(trainer.logger.log_dir)
 
-    with (log_path / "model.pkl").open("wb") as f:
-        pkl.dump(
-            {
-                "model_state": model.state_dict(),
-                "model_hparams": model.hparams,
-            },
-            f,
-        )
+    model.save(log_path)
     logs = log_path / "metrics.csv"
     plot_metrics(log_path, logs, max_epochs)
 
@@ -340,7 +333,7 @@ if __name__ == "__main__":
         run_length=run_length,
         hparams=hparams,
         max_epochs=3000,
-        check_val_every_n_epoch=50,
+        check_val_every_n_epoch=10,
         match_file_path="matches.yml",
         faceoff_turns=30,
         train_last=True,

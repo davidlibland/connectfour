@@ -36,6 +36,7 @@ def test_fantasy_play(rows, cols, batch_size, depth, run_length):
         depth=depth,
         run_length=run_length,
         discount=0.9,
+        epsilon=0.1,
     )
     assert "value" in result
     assert "move" in result

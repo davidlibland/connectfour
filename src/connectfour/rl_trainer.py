@@ -1,8 +1,10 @@
 """
 The main RL training code.
 """
-import collections
-from typing import Dict, Iterator, List, Tuple
+import pickle as pkl
+import random
+from pathlib import Path
+from typing import Dict, Iterator, List, Tuple, Union
 
 import lightning.pytorch as pl
 import numpy as np
@@ -21,6 +23,7 @@ from torch.utils.data import DataLoader, IterableDataset
 
 from connectfour.embedding_net import EmbeddingNet
 from connectfour.game import MutableBatchGameState
+from connectfour.mc_tree_search import mc_tree_search
 from connectfour.minimax import MiniMaxPolicyCorrector, minimax
 from connectfour.nn import sample_masked_multinomial
 from connectfour.play_state import PlayState, play_state_embedding_ix
@@ -99,18 +102,12 @@ class ConnectFourAI(pl.LightningModule):
             opponent_policy_net = self.policy_net
         self.opponent_policy_net = opponent_policy_net
         device = next(opponent_policy_net.parameters()).device
-        if minimax_depth > 0:
-            self.minimax_corrector = MiniMaxPolicyCorrector(
-                num_rows=kwargs["num_rows"],
-                num_cols=kwargs["num_cols"],
-                run_length=run_length,
-                depth=4,
-            )
+
         self.bgs = bgs
         self.val_bgs = MutableBatchGameState(**{**kwargs, "batch_size": val_batch_size})
         self.register_buffer("board_state", self.bgs._board_state)
         self.register_buffer("val_board_state", self.val_bgs._board_state)
-        play_first = False
+        play_first = random.choice([True, False])
         if play_first:
             self.play_state = PlayState.X
             self.opponent_play_state = PlayState.O
@@ -119,22 +116,34 @@ class ConnectFourAI(pl.LightningModule):
             self.opponent_play_state = PlayState.X
             # Let the opponent move:
             board_state = self.bgs.cannonical_board_state.to(device=device)
-            opponent_move = self.sample_move(
-                self.call_opponent, board_state=board_state
-            )
+            opponent_move = self.sample_move(self.policy_net, board_state=board_state)
             self.bgs.play_at(opponent_move)
         self.automatic_optimization = False
         self.swa_start = self.hparams.max_epochs // 10
         self.policy_start = int(
             self.hparams.max_epochs * self.hparams.value_net_burn_in_frac
         )
-        self.history = collections.deque()
 
-    def call_opponent(self, x: torch.Tensor):
-        if hasattr(self, "minimax_corrector"):
-            return self.minimax_corrector(x, self.opponent_policy_net)
-        else:
-            return self.opponent_policy_net(x)
+    def save(self, log_path: Path):
+        if log_path is None:
+            log_path = Path(self.trainer.logger.log_dir)
+        with (log_path / "model.pkl").open("wb") as f:
+            pkl.dump(
+                {
+                    "model_state": self.state_dict(),
+                    "model_hparams": self.hparams,
+                },
+                f,
+            )
+
+    @classmethod
+    def load(cls, log_path: Union[Path, str]):
+        model_file = Path(log_path) / "model.pkl"
+        with open(model_file, "rb") as f:
+            model_dict = pkl.load(f)
+        full_model = cls(**model_dict["model_hparams"], opponent_policy_net=None)
+        full_model.load_state_dict(model_dict["model_state"])
+        return full_model
 
     def sample_move(self, policy_net, board_state) -> torch.Tensor:
         return sample_move(self.bgs, policy_net, board_state)
@@ -153,186 +162,95 @@ class ConnectFourAI(pl.LightningModule):
             dtype=torch.float
         )
 
-    def take_composite_move_and_get_reward_delta(
-        self, board_state
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Both the player and the opponent take a move. The state is updated and
-        the (adjusted) reward:
-            R +\gamma v(new_state) - v(old_state)
-        is returned
-        """
-
-        # Choose a move:
-        move = self.sample_move(self._policy_net, board_state=board_state)
-
-        # Make the play:
-        self.bgs.play_at(move)
-        mid_board_state = self.bgs.cannonical_board_state
-
-        # Now check if the game is over:
-
-        winners = self.bgs.winners_numeric(run_length=self.hparams["run_length"])
-        # compute the rewards:
-        reward = self.get_reward(winners)
-
-        n_winners = self.get_win_count(winners)
-        # reset any dead games:
-        first_resets = winners != play_state_embedding_ix(None)
-
-        # Let the opponent move:
-        opponent_move = self.sample_move(
-            self.call_opponent, board_state=mid_board_state
-        )
-        self.bgs.play_at(opponent_move, first_resets)
-        final_board_state = self.bgs.cannonical_board_state
-
-        # Now check if the game is over:
-        winners = self.bgs.winners_numeric(run_length=self.hparams["run_length"])
-        # compute the rewards:
-        reward += self.get_reward(winners)
-        n_winners += self.get_win_count(winners)
-        # reset any dead games:
-        second_resets = winners != play_state_embedding_ix(None)
-
-        # Get the output_value, ignoring any resets:
-        final_value = self._value_net(final_board_state).flatten()
-
-        # Finally, reset any dead games:
-        self.bgs.reset_games(second_resets)
-
-        return {
-            "move": move,
-            "reward": reward,
-            "resets": first_resets | second_resets,
-            "final_value": final_value,
-            "n_winners": n_winners,
-        }
-
     def training_step(self, _):
         p_opt, v_opt = self.optimizers()
         p_sch, v_sch = self.lr_schedulers()
 
-        while len(self.history) < self.hparams.n_play_ahead_steps:
-            board_state = self.bgs.cannonical_board_state.clone()
-            with (torch.no_grad()):
-                # compute the delta:
-                state_updates = self.take_composite_move_and_get_reward_delta(
-                    board_state
-                )
-
-            self.history.append({**state_updates, "board_state": board_state})
-
-        # Compute the n-step-reward:
-        reward = torch.zeros(
-            board_state.shape[0], device=board_state.device, dtype=torch.float
-        )
-        any_reset = torch.zeros(
-            board_state.shape[0], device=board_state.device, dtype=torch.bool
-        )
-        for i, val_dict in enumerate(self.history):
-            next_reward = val_dict["reward"]
-            # Only accumulate rewards up to a reset of the board state.
-            reward += torch.where(
-                any_reset,
-                torch.zeros_like(reward),
-                self.hparams["gamma"] ** i * next_reward,
+        with torch.no_grad():
+            tree_search = mc_tree_search(
+                bgs=self.bgs,
+                value_net=self.value_net,
+                policy_net=self.policy_net,
+                run_length=self.hparams.run_length,
+                depth=8,
+                breadth=30,
+                discount=self.hparams["gamma"],
             )
-            any_reset |= val_dict["resets"]
-        final_value = self.history[-1]["final_value"]
-        amortized_reward = reward + torch.where(
-            any_reset,
-            torch.zeros_like(reward),
-            final_value * self.hparams["gamma"] ** (i + 1),
-        )
-        assert (
-            amortized_reward.abs() <= 1
-        ).all(), "Amortized reward should be bounded by 1: it's either win or loose."
 
-        # Now get the initial values to compute the gradient
-        val_dict = self.history.popleft()
-        board_state = val_dict["board_state"]
-        move = val_dict["move"]
-        n_winners = val_dict["n_winners"]
+        board_state = self.bgs.cannonical_board_state
 
         initial_value = self._value_net(board_state).flatten()
-        smooth_delta = amortized_reward - initial_value.detach()
-
-        temp = 1
         # get the value loss:
 
         # The amortized reward = gamma*future_reward
-        value_loss = 0.5 * (amortized_reward - initial_value) ** 2
-        # We compute re-weighted gradient decent loss, as in https://arxiv.org/pdf/2306.09222.pdf
-        value_loss_rew = value_loss  # * torch.exp(
-        #     torch.clamp(value_loss.detach(), max=temp) / (temp + 1)
-        # )
+        mc_value = tree_search["optimal_value"]
+        value_loss = 0.5 * (self.hparams.gamma * mc_value - initial_value) ** 2
 
         # Optimize the value net:
         v_opt.zero_grad()
-        self.manual_backward(value_loss_rew.mean())
+        self.manual_backward(value_loss.mean())
         nn.utils.clip_grad_norm_(self._value_net.parameters(), 1.0)
         v_opt.step()
         if self.current_epoch > self.swa_start:
             self.value_net.update_parameters(self._value_net)
-        v_sch.step(value_loss_rew.detach().mean())
+        v_sch.step(value_loss.detach().mean())
 
         # compute the policy loss:
-        full_logits = self._policy_net(board_state)
-        move_logits = torch.take_along_dim(full_logits, move.reshape([-1, 1]), dim=1)
-        policy_loss = -reward * move_logits.detach()
-        policy_loss_smooth = -smooth_delta * move_logits
-        # We compute re-weighted gradient decent loss, as in https://arxiv.org/pdf/2306.09222.pdf
-        policy_loss_rew = policy_loss_smooth  # * torch.exp(
-        #     torch.clamp(policy_loss_smooth.detach(), max=temp) / (temp + 1)
-        # )
-        total_policy_loss = policy_loss_rew
-
-        ce_loss = 0
-        if self.hparams.minimax_target and hasattr(self, "minimax_corrector"):
-            mini_logits = self.minimax_corrector(board_state, self.policy_net)
-            target = torch.argmax(mini_logits, dim=1)
-            ce_loss = nn.functional.cross_entropy(
-                full_logits, target.detach(), reduction="none"
-            )
-            print("using ce loss")
-            total_policy_loss += self.hparams.ce_loss_strength * ce_loss
+        mini_logits = self._policy_net(board_state)
+        mc_move = tree_search["move"]
+        policy_loss = nn.functional.cross_entropy(
+            mini_logits, mc_move, reduction="none"
+        )
 
         if self.current_epoch > self.policy_start:
             # Optimize the policy net:
             p_opt.zero_grad()
-            self.manual_backward(total_policy_loss.mean())
+            self.manual_backward(policy_loss.mean())
             nn.utils.clip_grad_norm_(self._policy_net.parameters(), 1.0)
             p_opt.step()
             if self.current_epoch > self.swa_start + self.policy_start:
                 self.policy_net.update_parameters(self._policy_net)
-            p_sch.step(total_policy_loss.detach().mean())
+            p_sch.step(policy_loss.detach().mean())
+
+        # Make the actual move:
+        player = self.bgs.turn
+        self.bgs.play_at(mc_move)
+
+        # Now check if the game is over:
+
+        winners = self.bgs.winners_numeric(run_length=self.hparams.run_length)
+        # compute the rewards:
+        def get_reward(winners, play_state: PlayState) -> torch.Tensor:
+            opponent_play_state = (
+                PlayState.O if play_state == PlayState.X else PlayState.X
+            )
+            return (winners == play_state_embedding_ix(play_state)).to(
+                dtype=torch.float
+            ) - (winners == play_state_embedding_ix(opponent_play_state)).to(
+                dtype=torch.float
+            )
+
+        reward = get_reward(winners, player)
+        # reset any dead games:
+        resets = winners != play_state_embedding_ix(None)
+        self.bgs.reset_games(resets)
 
         self.logger.log_metrics(
             {
-                "train_loss": (value_loss + total_policy_loss).mean(),
-                "reward": reward.mean(),
-                "avg_finishes": n_winners.mean(),
+                "train_loss": (value_loss + policy_loss).mean(),
                 "value_loss": value_loss.mean(),
-                "value_loss_smooth": 0.5 * (smooth_delta**2).mean(),
-                "policy_loss_smooth": policy_loss_smooth.mean(),
-                "ce_loss": ce_loss.mean(),
                 "policy_loss": policy_loss.mean(),
-                "bootstrapped": (value_loss < self.hparams.bootstrap_threshold)
-                .to(dtype=torch.float)
-                .mean(),
-                "good_delta_sign": ((smooth_delta * amortized_reward) >= 0)
-                .to(dtype=torch.float)
-                .mean(),
+                "spread": (tree_search["counts"] != 0).to(dtype=torch.float).mean(),
+                "reward": reward.mean(),
+                "value": initial_value.mean(),
+                "optimal_value": mc_value.mean(),
+                "mc_val_err": ((reward - mc_value) ** 2).mean(),
+                "mc_val_diff": ((reward - mc_value)).mean(),
             }
         )
 
-        del board_state
-        del move
-        del n_winners
-        del val_dict["final_value"]
-
     def validation_step(self, *args):
+        self.save(None)
         metrics = {"val_reward": [], "val_avg_finishes": [], "val_policy_loss": []}
         with (torch.no_grad()):
             for _ in range(self.hparams.n_play_ahead_steps):
