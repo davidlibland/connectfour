@@ -43,5 +43,5 @@ def load_cfai(log_path):
 
 def load_policy_net(log_path):
     full_model = load_cfai(log_path)
-    policy_net = full_model.policy_net
+    policy_net = full_model._policy_net
     return policy_net

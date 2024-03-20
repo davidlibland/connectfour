@@ -1,6 +1,7 @@
 """
 The main RL training code.
 """
+import math
 import pickle as pkl
 import random
 from pathlib import Path
@@ -10,6 +11,7 @@ import lightning.pytorch as pl
 import numpy as np
 import torch
 import torch.nn as nn
+from lightning.pytorch.utilities import grad_norm
 from torch.optim import AdamW, Optimizer
 from torch.optim.lr_scheduler import (
     ConstantLR,
@@ -72,16 +74,11 @@ class ConnectFourAI(pl.LightningModule):
         gamma,
         run_length,
         max_epochs,
-        value_net_burn_in_frac,
         weight_decay,
         n_play_ahead_steps,
-        bootstrap_threshold,
         val_batch_size,
         opponent_policy_net: nn.Module,
-        minimax_depth: int = 4,
-        minimax_target=True,
-        ce_loss_strength=1,
-        **kwargs
+        **kwargs,
     ):
         super().__init__()
         self.save_hyperparameters(
@@ -96,12 +93,14 @@ class ConnectFourAI(pl.LightningModule):
         )
         self._policy_net = PolicyNet(embedding=self._embedding, **policy_net_kwargs)
         self._value_net = ValueNet(embedding=self._embedding, **value_net_kwargs)
-        self.policy_net = AveragedModel(self._policy_net)
-        self.value_net = AveragedModel(self._value_net)
-        if opponent_policy_net is None:
-            opponent_policy_net = self.policy_net
-        self.opponent_policy_net = opponent_policy_net
-        device = next(opponent_policy_net.parameters()).device
+        self.swa = False
+        # if self.swa:
+        #     self.policy_net = AveragedModel(self._policy_net)
+        #     self.value_net = AveragedModel(self._value_net)
+        # else:
+        #     self.policy_net = self._policy_net
+        #     self.value_net = self._value_net
+        device = next(self._policy_net.parameters()).device
 
         self.bgs = bgs
         self.val_bgs = MutableBatchGameState(**{**kwargs, "batch_size": val_batch_size})
@@ -116,13 +115,10 @@ class ConnectFourAI(pl.LightningModule):
             self.opponent_play_state = PlayState.X
             # Let the opponent move:
             board_state = self.bgs.cannonical_board_state.to(device=device)
-            opponent_move = self.sample_move(self.policy_net, board_state=board_state)
+            opponent_move = self.sample_move(self._policy_net, board_state=board_state)
             self.bgs.play_at(opponent_move)
         self.automatic_optimization = False
         self.swa_start = self.hparams.max_epochs // 10
-        self.policy_start = int(
-            self.hparams.max_epochs * self.hparams.value_net_burn_in_frac
-        )
 
     def save(self, log_path: Path):
         if log_path is None:
@@ -164,13 +160,13 @@ class ConnectFourAI(pl.LightningModule):
 
     def training_step(self, _):
         p_opt, v_opt = self.optimizers()
-        p_sch, v_sch = self.lr_schedulers()
+        # p_sch, v_sch = self.lr_schedulers()
 
         with torch.no_grad():
             tree_search = mc_tree_search(
                 bgs=self.bgs,
-                value_net=self.value_net,
-                policy_net=self.policy_net,
+                value_net=self._value_net,
+                policy_net=self._policy_net,
                 run_length=self.hparams.run_length,
                 depth=8,
                 breadth=30,
@@ -189,11 +185,15 @@ class ConnectFourAI(pl.LightningModule):
         # Optimize the value net:
         v_opt.zero_grad()
         self.manual_backward(value_loss.mean())
+        total_val_norm = grad_norm(self._value_net, norm_type=2)["grad_2.0_norm_total"]
+        embedding_val_norm = grad_norm(self._value_net.embedding, norm_type=2)[
+            "grad_2.0_norm_total"
+        ]
         nn.utils.clip_grad_norm_(self._value_net.parameters(), 1.0)
         v_opt.step()
-        if self.current_epoch > self.swa_start:
-            self.value_net.update_parameters(self._value_net)
-        v_sch.step(value_loss.detach().mean())
+        # if self.swa and self.current_epoch > self.swa_start:
+        #     self.value_net.update_parameters(self._value_net)
+        # v_sch.step()
 
         # compute the policy loss:
         mini_logits = self._policy_net(board_state)
@@ -201,16 +201,28 @@ class ConnectFourAI(pl.LightningModule):
         policy_loss = nn.functional.cross_entropy(
             mini_logits, mc_move, reduction="none"
         )
+        accuracy = (torch.argmax(mini_logits, dim=1) == mc_move).to(dtype=torch.float)
 
-        if self.current_epoch > self.policy_start:
-            # Optimize the policy net:
-            p_opt.zero_grad()
-            self.manual_backward(policy_loss.mean())
-            nn.utils.clip_grad_norm_(self._policy_net.parameters(), 1.0)
-            p_opt.step()
-            if self.current_epoch > self.swa_start + self.policy_start:
-                self.policy_net.update_parameters(self._policy_net)
-            p_sch.step(policy_loss.detach().mean())
+        # Compute the entropy:
+        probs = torch.softmax(mini_logits, dim=1)
+        entropy = (-probs * torch.log2(probs)).sum(dim=1)
+        flat_entropy = math.log2(self.bgs._num_cols)
+
+        # Optimize the policy net:
+        p_opt.zero_grad()
+        policy_loss_rw = (1 + mc_value**2).detach() * policy_loss
+        self.manual_backward(policy_loss_rw.mean())
+        total_policy_norm = grad_norm(self._policy_net, norm_type=2)[
+            "grad_2.0_norm_total"
+        ]
+        embedding_pol_norm = grad_norm(self._value_net.embedding, norm_type=2)[
+            "grad_2.0_norm_total"
+        ]
+        nn.utils.clip_grad_norm_(self._policy_net.parameters(), 1.0)
+        p_opt.step()
+        # if self.swa and self.current_epoch > self.swa_start:
+        #     self.policy_net.update_parameters(self._policy_net)
+        # p_sch.step()
 
         # Make the actual move:
         player = self.bgs.turn
@@ -233,6 +245,15 @@ class ConnectFourAI(pl.LightningModule):
         reward = get_reward(winners, player)
         # reset any dead games:
         resets = winners != play_state_embedding_ix(None)
+        if resets.any() and self.current_epoch % 100 == 0:
+            outs = self.bgs._board_state[resets, ...]
+            with open(
+                f"{self.trainer.logger.log_dir}/games_{self.current_epoch // 1000}.txt",
+                "a",
+            ) as f:
+                f.write(f"\n\nPlaying as {player} on epoch {self.current_epoch}\n")
+                f.write(str(MutableBatchGameState(state=outs)))
+
         self.bgs.reset_games(resets)
 
         self.logger.log_metrics(
@@ -246,6 +267,14 @@ class ConnectFourAI(pl.LightningModule):
                 "optimal_value": mc_value.mean(),
                 "mc_val_err": ((reward - mc_value) ** 2).mean(),
                 "mc_val_diff": ((reward - mc_value)).mean(),
+                "accuracy": accuracy.mean(),
+                "final_accuracy": accuracy[resets].mean(),
+                "entropy": entropy.mean() - flat_entropy,
+                "final_entropy": entropy[resets].mean() - flat_entropy,
+                "total_val_norm": total_val_norm,
+                "total_pol_norm": total_policy_norm,
+                "embedding_val_norm": embedding_val_norm,
+                "embedding_pol_norm": embedding_pol_norm,
             }
         )
 
@@ -335,61 +364,59 @@ class ConnectFourAI(pl.LightningModule):
             lr=self.hparams.policy_lr,
             weight_decay=self.hparams.weight_decay,
         )
-        policy_scheduler = {
-            "scheduler": ReduceLROnPlateau(optimizer=policy_optimizer),
-            # OneCycleLR(
-            #     optimizer=policy_optimizer,
-            #     max_lr=self.hparams.policy_lr * 10,
-            #     steps_per_epoch=1,
-            #     epochs=self.hparams.max_epochs,
-            # ),
-            # SequentialLR(
-            #     policy_optimizer,
-            #     [
-            #         # CosineAnnealingLR(policy_optimizer, T_max=self.hparams.max_epochs),
-            #         ConstantLR(policy_optimizer),
-            #         SWALR(
-            #             policy_optimizer,
-            #             swa_lr=self.hparams.policy_lr / 10,
-            #             anneal_epochs=self.hparams.max_epochs // 10,
-            #             anneal_strategy="cos",
-            #         ),
-            #     ],
-            #     milestones=[self.swa_start + self.policy_start],
-            # ),
-            "interval": "epoch",
-        }
+        # policy_scheduler = {
+        #     "scheduler": OneCycleLR(  # ReduceLROnPlateau(optimizer=policy_optimizer),
+        #         optimizer=policy_optimizer,
+        #         max_lr=self.hparams.policy_lr * 10,
+        #         steps_per_epoch=1,
+        #         epochs=self.hparams.max_epochs,
+        #     ),
+        #     # SequentialLR(
+        #     #     policy_optimizer,
+        #     #     [
+        #     #         # CosineAnnealingLR(policy_optimizer, T_max=self.hparams.max_epochs),
+        #     #         ConstantLR(policy_optimizer),
+        #     #         SWALR(
+        #     #             policy_optimizer,
+        #     #             swa_lr=self.hparams.policy_lr / 10,
+        #     #             anneal_epochs=self.hparams.max_epochs // 10,
+        #     #             anneal_strategy="cos",
+        #     #         ),
+        #     #     ],
+        #     #     milestones=[self.swa_start + self.policy_start],
+        #     # ),
+        #     "interval": "epoch",
+        # }
 
         value_optimizer = AdamW(
             list(self._value_net.parameters()) + list(self._embedding.parameters()),
             lr=self.hparams.value_lr,
             weight_decay=self.hparams.weight_decay,
         )
-        value_scheduler = {
-            "scheduler": ReduceLROnPlateau(optimizer=value_optimizer),
-            # OneCycleLR(
-            #     optimizer=value_optimizer,
-            #     max_lr=self.hparams.value_lr * 10,
-            #     steps_per_epoch=1,
-            #     epochs=self.hparams.max_epochs,
-            # ),
-            #     SequentialLR(
-            #     value_optimizer,
-            #     [
-            #         # CosineAnnealingLR(value_optimizer, T_max=self.hparams.max_epochs),
-            #         ConstantLR(value_optimizer),
-            #         SWALR(
-            #             value_optimizer,
-            #             swa_lr=self.hparams.value_lr / 10,
-            #             anneal_epochs=self.hparams.max_epochs // 10,
-            #             anneal_strategy="cos",
-            #         ),
-            #     ],
-            #     milestones=[self.swa_start],
-            # ),
-            "interval": "epoch",
-        }
-        return [policy_optimizer, value_optimizer], [
-            policy_scheduler,
-            value_scheduler,
-        ]
+        # value_scheduler = {
+        #     "scheduler": OneCycleLR(  # ReduceLROnPlateau(optimizer=value_optimizer),
+        #         optimizer=value_optimizer,
+        #         max_lr=self.hparams.value_lr * 10,
+        #         steps_per_epoch=1,
+        #         epochs=self.hparams.max_epochs,
+        #     ),
+        #     #     SequentialLR(
+        #     #     value_optimizer,
+        #     #     [
+        #     #         # CosineAnnealingLR(value_optimizer, T_max=self.hparams.max_epochs),
+        #     #         ConstantLR(value_optimizer),
+        #     #         SWALR(
+        #     #             value_optimizer,
+        #     #             swa_lr=self.hparams.value_lr / 10,
+        #     #             anneal_epochs=self.hparams.max_epochs // 10,
+        #     #             anneal_strategy="cos",
+        #     #         ),
+        #     #     ],
+        #     #     milestones=[self.swa_start],
+        #     # ),
+        #     "interval": "epoch",
+        # }
+        return [policy_optimizer, value_optimizer]  # , [
+        #     policy_scheduler,
+        #     value_scheduler,
+        # ]

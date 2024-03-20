@@ -74,7 +74,7 @@ def train_new_network(
 
 
 def plot_metrics(log_path, logs, max_epochs):
-    log_df = pd.read_csv(logs).set_index("step")
+    log_df = pd.read_csv(logs)  # .set_index("step")
     val_met = re.compile(r"^val_(?P<rest>.*)")
     val_df = log_df[[v for v in log_df.columns if val_met.match(v)]]
     val_df = val_df.rename(
@@ -314,16 +314,13 @@ if __name__ == "__main__":
         "policy_net_kwargs": dict(kernel_size=3),
         "value_net_kwargs": dict(kernel_size=3, n_cols=n_cols, n_rows=n_rows),
         "embedding_net_kwargs": dict(kernel_size=3, latent_dim=10, depth=2),
-        "policy_lr": 3e-2,
-        "value_lr": 3e-2,
+        "policy_lr": 1e-3,
+        "value_lr": 1e-3,
         "gamma": 0.9,
-        "batch_size": 128,
+        "batch_size": 256,
         "val_batch_size": 64,
-        "value_net_burn_in_frac": 0.0,
         "n_play_ahead_steps": 10,
         "weight_decay": 0.03,
-        "bootstrap_threshold": 0.3,
-        "minimax_depth": 4,
     }
 
     bootstrap_models(
@@ -333,7 +330,7 @@ if __name__ == "__main__":
         run_length=run_length,
         hparams=hparams,
         max_epochs=3000,
-        check_val_every_n_epoch=10,
+        check_val_every_n_epoch=100,
         match_file_path="matches.yml",
         faceoff_turns=30,
         train_last=True,
